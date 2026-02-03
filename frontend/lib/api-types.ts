@@ -1,0 +1,127 @@
+// API Type Definitions
+
+export interface VolumeMetadata {
+    volume_id: string
+    file_name: string
+    dimensions: [number, number, number]
+    spacing: [number, number, number]
+    origin: [number, number, number]
+    direction: number[]
+    pixel_type: string
+    number_of_components: number
+    size_bytes: number
+    loaded_at: string
+}
+
+export interface CreatePairRequest {
+    ct_volume_id: string
+    seg_volume_id: string
+    auto_resample?: boolean
+}
+
+export interface CreatePairResponse {
+    pair_id: string
+    compatible: boolean
+    resampled: boolean
+    ct_metadata: VolumeMetadata
+    seg_metadata: VolumeMetadata
+}
+
+export interface PairMetadata {
+    pair_id: string
+    ct_metadata: VolumeMetadata
+    seg_metadata: VolumeMetadata
+    seg_metadatas?: VolumeMetadata[]
+}
+
+export interface AddSegmentRequest {
+    seg_volume_id: string
+    auto_resample?: boolean
+}
+
+export interface IndexToPhysicalRequest {
+    slice_index: number
+    orientation: 'axial' | 'sagittal' | 'coronal'
+}
+
+export interface IndexToPhysicalResponse {
+    physical_position: number
+}
+
+export interface PhysicalToIndexRequest {
+    physical_position: number
+    orientation: 'axial' | 'sagittal' | 'coronal'
+}
+
+export interface PhysicalToIndexResponse {
+    slice_index: number
+}
+
+export interface CTSliceParams {
+    volume_id: string
+    slice_index: number
+    orientation?: 'axial' | 'sagittal' | 'coronal'
+    window_level?: number
+    window_width?: number
+    format?: 'png'
+}
+
+export interface SegmentationSliceParams {
+    volume_id: string
+    slice_index: number
+    orientation?: 'axial' | 'sagittal' | 'coronal'
+    mode?: 'filled' | 'boundary'
+    format?: 'png'
+}
+
+export interface WindowFromRoiParams {
+    volume_id: string
+    slice_index: number
+    orientation?: 'axial' | 'sagittal' | 'coronal'
+    center_x: number
+    center_y: number
+    radius_mm?: number
+}
+
+export interface WindowFromRoiResponse {
+    level: number
+    width: number
+}
+
+export interface RegisterDatasetRequest {
+    images_dir: string
+    labels_dir?: string
+    preds_dir?: string
+}
+
+export interface RegisterDatasetResponse {
+    dataset_id: string
+    case_count: number
+    case_ids: string[]
+}
+
+export interface OpenCaseRequest {
+    case_index?: number
+    case_id?: string
+}
+
+export interface OpenCaseResponse {
+    case_id: string
+    case_index: number
+    image_volume_id: string
+    image_metadata: VolumeMetadata
+    label_volume_id: string | null
+    label_metadata: VolumeMetadata | null
+    label_all_background?: boolean | null
+    pred_volume_id: string | null
+    pred_metadata: VolumeMetadata | null
+}
+
+export interface GetCasesResponse {
+    case_count: number
+    case_ids: string[]
+}
+
+export interface FirstSliceWithMaskResponse {
+    slice_index: number
+}

@@ -1,0 +1,27 @@
+{
+  "name": "ct-segmentation-viewer-app",
+  "version": "1.0.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "electron": "electron .",
+    "electron:dev": "electron .",
+    "build:app": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.ctviewer.app",
+    "productName": "CT Segmentation Viewer",
+    "mac": {
+      "category": "public.app-category.medical",
+      "icon": "firefly-ct.ico",
+      "target": "dir"
+    },
+    "directories": {
+      "output": "dist"
+    }
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  }
+}

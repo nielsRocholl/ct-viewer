@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    :root {
+        /* Light mode — Pampas, Crail, Cloudy */
+        --background: 50 21% 95%;
+        --foreground: 45 9% 20%;
+        --primary: 16 69% 50%;
+        --primary-foreground: 0 0% 100%;
+        --secondary: 45 9% 66%;
+        --secondary-foreground: 45 9% 20%;
+        --muted: 45 9% 90%;
+        --muted-foreground: 45 9% 45%;
+        --card: 0 0% 100%;
+        --card-foreground: 45 9% 20%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 45 9% 20%;
+        --accent: 45 9% 90%;
+        --accent-foreground: 45 9% 20%;
+        --destructive: 0 84% 60%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 45 9% 85%;
+        --input: 45 9% 85%;
+        --ring: 16 69% 50%;
+        --radius: 0.5rem;
+        /* Semantic (data signals) */
+        --positive: 142 76% 36%;
+        --negative: 0 84% 60%;
+        --warning: 38 92% 50%;
+        --info: 221 83% 53%;
+        --chart-1: 16 69% 50%;
+        --chart-2: 142 76% 36%;
+        --chart-3: 0 84% 60%;
+        --chart-4: 38 92% 50%;
+        --chart-5: 221 83% 53%;
+        --sidebar-background: 0 0% 98%;
+        --sidebar-foreground: 240 5.3% 26.1%;
+        --sidebar-primary: 240 5.9% 10%;
+        --sidebar-primary-foreground: 0 0% 98%;
+        --sidebar-accent: 240 4.8% 95.9%;
+        --sidebar-accent-foreground: 240 5.9% 10%;
+        --sidebar-border: 220 13% 91%;
+        --sidebar-ring: 217.2 91.2% 59.8%;
+    }
+
+    .dark {
+        /* Dark mode */
+        --background: 0 0% 10%;
+        --foreground: 45 100% 97%;
+        --primary: 16 69% 50%;
+        --primary-foreground: 0 0% 100%;
+        --secondary: 0 0% 22%;
+        --secondary-foreground: 45 100% 97%;
+        --muted: 0 0% 18%;
+        --muted-foreground: 45 9% 70%;
+        --card: 0 0% 12%;
+        --card-foreground: 45 100% 97%;
+        --popover: 0 0% 12%;
+        --popover-foreground: 45 100% 97%;
+        --accent: 0 0% 18%;
+        --accent-foreground: 45 100% 97%;
+        --destructive: 0 84% 60%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 0 0% 22%;
+        --input: 0 0% 22%;
+        --ring: 16 69% 50%;
+        --positive: 142 76% 36%;
+        --negative: 0 84% 60%;
+        --warning: 38 92% 50%;
+        --info: 221 83% 53%;
+        --chart-1: 16 69% 50%;
+        --chart-2: 142 76% 36%;
+        --chart-3: 0 84% 60%;
+        --chart-4: 38 92% 50%;
+        --chart-5: 221 83% 53%;
+        --sidebar-background: 0 0% 13%;
+        --sidebar-foreground: 45 100% 97%;
+        --sidebar-primary: 224.3 76.3% 48%;
+        --sidebar-primary-foreground: 0 0% 100%;
+        --sidebar-accent: 0 0% 20%;
+        --sidebar-accent-foreground: 45 100% 97%;
+        --sidebar-border: 0 0% 22%;
+        --sidebar-ring: 217.2 91.2% 59.8%;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+
+    body {
+        @apply bg-background text-foreground;
+    }
+}
+
+/* Electron: sidebar extends to top so traffic lights sit inside it */
+body[data-electron] [data-variant="floating"]>div.fixed {
+    top: 0;
+    height: 100vh;
+}
+
+/* Space below traffic lights (y: 24) so first content sits just under the stoplights */
+body[data-electron] [data-variant="floating"] [data-sidebar="content"] {
+    padding-top: 44px;
+}
+
+/* Draggable region at top of sidebar so window can be moved */
+body[data-electron] [data-sidebar="sidebar"] .sidebar-drag-region {
+    -webkit-app-region: drag;
+    app-region: drag;
+}
+
+body[data-electron] [data-sidebar="sidebar"] [data-sidebar="content"] {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
