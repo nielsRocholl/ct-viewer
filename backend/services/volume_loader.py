@@ -182,6 +182,40 @@ class VolumeLoaderService:
         
         if volume_id in self._metadata:
             del self._metadata[volume_id]
+
+    def replace_volume(self, volume_id: str, volume: sitk.Image) -> None:
+        """Replace an existing cached volume and update its metadata."""
+        if volume_id not in self._volumes or volume_id not in self._metadata:
+            raise VolumeLoadError(f"Volume not found: {volume_id}")
+        if volume.GetDimension() != 3:
+            raise VolumeLoadError(
+                f"Volume must be 3D, got {volume.GetDimension()}D"
+            )
+        self._volumes[volume_id] = volume
+        meta = self._metadata[volume_id]
+        dims = volume.GetSize()
+        spacing = volume.GetSpacing()
+        origin = volume.GetOrigin()
+        direction = volume.GetDirection()
+        pixel_type = volume.GetPixelIDTypeAsString()
+        components = volume.GetNumberOfComponentsPerPixel()
+        size_bytes = (
+            dims[0] * dims[1] * dims[2] *
+            components *
+            self._get_pixel_size_bytes(volume.GetPixelID())
+        )
+        self._metadata[volume_id] = VolumeMetadata(
+            volume_id=meta.volume_id,
+            file_name=meta.file_name,
+            dimensions=dims,
+            spacing=spacing,
+            origin=origin,
+            direction=direction,
+            pixel_type=pixel_type,
+            number_of_components=components,
+            size_bytes=size_bytes,
+            loaded_at=meta.loaded_at,
+        )
     
     def list_volumes(self) -> Dict[str, VolumeMetadata]:
         """Get all loaded volume metadata

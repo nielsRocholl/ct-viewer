@@ -9,7 +9,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -95,10 +95,11 @@ def scan_dataset(
     images_dir: str,
     labels_dir: Optional[str] = None,
     preds_dir: Optional[str] = None,
-) -> tuple[List[str], Dict[str, Dict[str, str]]]:
+    segmentations: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
     """
     Scan folders and build case index. Returns (case_ids sorted, cases dict).
-    cases[case_id] = { "image": path, "label": path?, "pred": path? }.
+    cases[case_id] = { "image": path, "segs": [{path, role, name}] }.
     Images use first file per case (alphabetically); nnUNet base name for matching.
     """
     roots = _allowed_roots()
@@ -115,33 +116,34 @@ def scan_dataset(
     if not case_ids:
         raise ValueError(f"No supported image files found in {images_dir}")
 
-    labels_path = Path(labels_dir) if labels_dir else None
-    preds_path = Path(preds_dir) if preds_dir else None
-    if labels_path and roots and labels_path.exists():
-        if not _under_allowed_root(labels_path.resolve(), roots):
-            labels_path = None
-    if preds_path and roots and preds_path.exists():
-        if not _under_allowed_root(preds_path.resolve(), roots):
-            preds_path = None
+    if segmentations is None:
+        segmentations = []
+        if labels_dir:
+            segmentations.append({"path": labels_dir, "role": "gt", "name": "Label"})
+        if preds_dir:
+            segmentations.append({"path": preds_dir, "role": "pred", "name": "Prediction"})
 
-    label_bases = (
-        _collect_by_base(labels_path, roots, _base_from_label_or_pred, "label")
-        if labels_path and labels_path.exists()
-        else {}
-    )
-    pred_bases = (
-        _collect_by_base(preds_path, roots, _base_from_label_or_pred, "pred")
-        if preds_path and preds_path.exists()
-        else {}
-    )
+    seg_bases: List[Dict[str, str]] = []
+    for seg in segmentations:
+        seg_path = Path(seg["path"]) if seg.get("path") else None
+        if seg_path and roots and seg_path.exists():
+            if not _under_allowed_root(seg_path.resolve(), roots):
+                seg_path = None
+        bases = (
+            _collect_by_base(seg_path, roots, _base_from_label_or_pred, "seg")
+            if seg_path and seg_path.exists()
+            else {}
+        )
+        seg_bases.append(bases)
 
-    cases: Dict[str, Dict[str, str]] = {}
+    cases: Dict[str, Dict[str, Any]] = {}
     for cid in case_ids:
-        entry: Dict[str, str] = {"image": image_bases[cid]}
-        if cid in label_bases:
-            entry["label"] = label_bases[cid]
-        if cid in pred_bases:
-            entry["pred"] = pred_bases[cid]
+        entry: Dict[str, Any] = {"image": image_bases[cid], "segs": []}
+        for seg, bases in zip(segmentations, seg_bases):
+            path = bases.get(cid)
+            entry["segs"].append(
+                {"path": path, "role": seg.get("role"), "name": seg.get("name")}
+            )
         cases[cid] = entry
 
     return case_ids, cases

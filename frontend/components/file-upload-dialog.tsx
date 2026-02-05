@@ -2,10 +2,9 @@
 
 import { useState, useRef, DragEvent, ChangeEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { uploadVolume, createPair, fetchFirstSliceWithMask } from '@/lib/api-client'
+import { uploadVolume, createPair, addSegmentToPair, fetchFirstSliceWithMask } from '@/lib/api-client'
 import { VolumeMetadata, CreatePairResponse } from '@/lib/api-types'
 import { useViewerStore } from '@/lib/store'
-import { generateDefaultColorMap } from '@/lib/color-utils'
 import {
     Dialog,
     DialogContent,
@@ -18,7 +17,7 @@ import { Button } from './ui/button'
 import { Label } from './ui/label'
 import { Progress } from './ui/progress'
 import { Alert, AlertDescription, AlertTitle } from './ui/alert'
-import { Upload, FileUp, CheckCircle2, XCircle, AlertCircle } from 'lucide-react'
+import { Upload, FileUp, CheckCircle2, XCircle, AlertCircle, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 interface FileUploadDialogProps {
@@ -26,22 +25,31 @@ interface FileUploadDialogProps {
 }
 
 type UploadStage = 'idle' | 'uploading-ct' | 'uploading-seg' | 'creating-pair' | 'success' | 'error'
+type SegRole = 'gt' | 'pred' | null
+type SegEntry = { file: File | null; name: string; color: string; role: SegRole }
+
+const ordinal = (n: number) => {
+    const v = n % 100
+    const s = ['th', 'st', 'nd', 'rd']
+    return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`
+}
 
 export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
     const [open, setOpen] = useState(false)
     const [ctFile, setCtFile] = useState<File | null>(null)
-    const [segFile, setSegFile] = useState<File | null>(null)
+    const [segs, setSegs] = useState<SegEntry[]>([])
     const [stage, setStage] = useState<UploadStage>('idle')
+    const [expandedSeg, setExpandedSeg] = useState<number | null>(null)
     const [uploadProgress, setUploadProgress] = useState(0)
     const [errorMessage, setErrorMessage] = useState<string | null>(null)
     const [validationResult, setValidationResult] = useState<CreatePairResponse | null>(null)
     const [isDraggingCt, setIsDraggingCt] = useState(false)
-    const [isDraggingSeg, setIsDraggingSeg] = useState(false)
 
     const ctInputRef = useRef<HTMLInputElement>(null)
-    const segInputRef = useRef<HTMLInputElement>(null)
+    const segInputRefs = useRef<(HTMLInputElement | null)[]>([])
 
     const addPair = useViewerStore((state) => state.addPair)
+    const addSegToPairStore = useViewerStore((state) => state.addSegToPair)
     const updatePairSlice = useViewerStore((state) => state.updatePairSlice)
     const snapToMask = useViewerStore((state) => state.snapToMask)
     const pairs = useViewerStore((state) => state.pairs)
@@ -76,12 +84,21 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
             setUploadProgress(100)
             setValidationResult(response)
             setStage('success')
-            const colorMap = generateDefaultColorMap([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            const firstSeg = segs[0]
+            const firstColor = firstSeg?.color ?? '#0072B2'
+            const colorMap = new Map([[1, firstColor]])
             addPair({
                 pairId: response.pair_id,
                 ctVolumeId: response.ct_metadata.volume_id,
                 segVolumeId: response.seg_metadata.volume_id,
-                segVolumes: [{ volumeId: response.seg_metadata.volume_id, colorMap, visible: true }],
+                segVolumes: [{
+                    volumeId: response.seg_metadata.volume_id,
+                    colorMap,
+                    visible: true,
+                    mode: 'filled',
+                    name: firstSeg?.name,
+                    role: firstSeg?.role ?? undefined,
+                }],
                 currentSliceIndex: 0,
                 orientation: 'axial',
                 windowLevel: 40,
@@ -120,12 +137,21 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
         }
     }
 
-    const handleSegFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0]
-        if (file) {
-            setSegFile(file)
-            setErrorMessage(null)
-        }
+    const addSegEntry = () => {
+        setSegs((prev) => {
+            if (prev.length >= 10) return prev
+            const next = [
+                ...prev,
+                { file: null, name: `Segmentation ${prev.length + 1}`, color: '#0072B2', role: null },
+            ]
+            return next
+        })
+        setExpandedSeg((prev) => (prev === null ? 0 : segs.length))
+    }
+
+    const updateSeg = (index: number, patch: Partial<SegEntry>) => {
+        setSegs((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)))
+        setErrorMessage(null)
     }
 
     const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
@@ -157,33 +183,9 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
         }
     }
 
-    const handleSegDragEnter = (e: DragEvent<HTMLDivElement>) => {
-        e.preventDefault()
-        e.stopPropagation()
-        setIsDraggingSeg(true)
-    }
-
-    const handleSegDragLeave = (e: DragEvent<HTMLDivElement>) => {
-        e.preventDefault()
-        e.stopPropagation()
-        setIsDraggingSeg(false)
-    }
-
-    const handleSegDrop = (e: DragEvent<HTMLDivElement>) => {
-        e.preventDefault()
-        e.stopPropagation()
-        setIsDraggingSeg(false)
-
-        const file = e.dataTransfer.files[0]
-        if (file) {
-            setSegFile(file)
-            setErrorMessage(null)
-        }
-    }
-
     const handleUpload = async () => {
-        if (!ctFile || !segFile) {
-            setErrorMessage('Please select both CT and segmentation files')
+        if (!ctFile || segs.length === 0 || segs.some((s) => !s.file)) {
+            setErrorMessage('Please select a CT file and at least one segmentation mask')
             return
         }
 
@@ -194,6 +196,10 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
             })
             return
         }
+        if (segs.length > 10) {
+            setErrorMessage('Maximum of 10 masks allowed per pair')
+            return
+        }
 
         setStage('uploading-ct')
         setUploadProgress(0)
@@ -201,20 +207,50 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
         setValidationResult(null)
 
         try {
-            setUploadProgress(10)
+            const totalSteps = 2 + segs.length + Math.max(0, segs.length - 1)
+            let completed = 0
+            const bump = (step: number) => {
+                completed += step
+                setUploadProgress(Math.min(100, Math.round((completed / totalSteps) * 100)))
+            }
+
+            setUploadProgress(5)
             const ctMetadata = await uploadCtMutation.mutateAsync(ctFile)
+            bump(1)
 
             setStage('uploading-seg')
-            setUploadProgress(40)
-            const segMetadata = await uploadSegMutation.mutateAsync(segFile)
+            const segMetas: VolumeMetadata[] = []
+            for (const seg of segs) {
+                const meta = await uploadSegMutation.mutateAsync(seg.file as File)
+                segMetas.push(meta)
+                bump(1)
+            }
 
             setStage('creating-pair')
-            setUploadProgress(70)
-            await createPairMutation.mutateAsync({
+            const firstSeg = segMetas[0]
+            const pairResponse = await createPairMutation.mutateAsync({
                 ct_volume_id: ctMetadata.volume_id,
-                seg_volume_id: segMetadata.volume_id,
+                seg_volume_id: firstSeg.volume_id,
                 auto_resample: true, // Enable automatic resampling
             })
+            bump(1)
+
+            for (let i = 1; i < segMetas.length; i += 1) {
+                await addSegmentToPair(pairResponse.pair_id, {
+                    seg_volume_id: segMetas[i].volume_id,
+                    auto_resample: true,
+                })
+                const seg = segs[i]
+                addSegToPairStore(
+                    pairResponse.pair_id,
+                    segMetas[i].volume_id,
+                    new Map([[1, seg.color]]),
+                    seg.name,
+                    seg.role ?? undefined
+                )
+                bump(1)
+            }
+
         } catch (error) {
             console.error('Upload failed:', error)
         }
@@ -222,13 +258,14 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
 
     const handleReset = () => {
         setCtFile(null)
-        setSegFile(null)
+        setSegs([])
         setStage('idle')
         setUploadProgress(0)
         setErrorMessage(null)
         setValidationResult(null)
+        setExpandedSeg(null)
         if (ctInputRef.current) ctInputRef.current.value = ''
-        if (segInputRef.current) segInputRef.current.value = ''
+        segInputRefs.current = []
     }
 
     const handleOpenChange = (newOpen: boolean) => {
@@ -239,7 +276,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
     }
 
     const isUploading = stage === 'uploading-ct' || stage === 'uploading-seg' || stage === 'creating-pair'
-    const canUpload = ctFile && segFile && !isUploading
+    const canUpload = ctFile && segs.length > 0 && segs.every((s) => s.file) && !isUploading
 
     return (
         <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -247,15 +284,15 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                 {trigger || (
                     <Button className="gap-2">
                         <Upload className="h-4 w-4" />
-                        Upload Pair
+                        Upload
                     </Button>
                 )}
             </DialogTrigger>
-            <DialogContent className="sm:max-w-[600px]">
+            <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-y-auto">
                 <DialogHeader>
                     <DialogTitle>Upload CT and Segmentation Pair</DialogTitle>
                     <DialogDescription>
-                        Select or drag and drop CT volume and segmentation mask files. Supported formats: .nii,
+                        Select or drag and drop one CT volume and up to 10 segmentation masks. Supported formats: .nii,
                         .nii.gz, .mha, .mhd
                     </DialogDescription>
                 </DialogHeader>
@@ -274,11 +311,13 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                             onDragLeave={handleCtDragLeave}
                             onDrop={handleCtDrop}
                         >
-                            <div className="flex flex-col items-center gap-2 text-center w-full min-w-0">
+                            <div className="flex flex-col items-center gap-2 text-center w-full min-w-0 overflow-hidden">
                                 <FileUp className="h-8 w-8 text-muted-foreground shrink-0" />
                                 <div className="text-sm w-full min-w-0">
                                     {ctFile ? (
-                                        <p className="font-medium text-foreground break-all">{ctFile.name}</p>
+                                        <p className="w-full max-w-full font-medium text-foreground break-all">
+                                            {ctFile.name}
+                                        </p>
                                     ) : (
                                         <>
                                             <p className="font-medium">Drop CT file here or click to browse</p>
@@ -310,53 +349,133 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                         </div>
                     </div>
 
-                    {/* Segmentation File Upload */}
-                    <div className="space-y-2">
-                        <Label htmlFor="seg-file">Segmentation Mask</Label>
-                        <div
-                            className={`border-2 border-dashed rounded-lg p-6 transition-colors w-full min-w-0 ${isDraggingSeg
-                                ? 'border-primary bg-primary/5'
-                                : 'border-muted-foreground/25 hover:border-muted-foreground/50'
-                                }`}
-                            onDragOver={handleDragOver}
-                            onDragEnter={handleSegDragEnter}
-                            onDragLeave={handleSegDragLeave}
-                            onDrop={handleSegDrop}
-                        >
-                            <div className="flex flex-col items-center gap-2 text-center w-full min-w-0">
-                                <FileUp className="h-8 w-8 text-muted-foreground shrink-0" />
-                                <div className="text-sm w-full min-w-0">
-                                    {segFile ? (
-                                        <p className="font-medium text-foreground break-all">{segFile.name}</p>
-                                    ) : (
-                                        <>
-                                            <p className="font-medium">Drop segmentation file here or click to browse</p>
-                                            <p className="text-muted-foreground text-xs mt-1">
-                                                .nii, .nii.gz, .mha, .mhd
-                                            </p>
-                                        </>
-                                    )}
+                    {/* Segmentation File Uploads */}
+                    <div className="space-y-3">
+                        {segs.map((seg, idx) => (
+                            <div key={idx} className="rounded-lg border border-border p-3 space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="text-xs"
+                                        onClick={() => setExpandedSeg(idx)}
+                                    >
+                                        Segmentation {idx + 1}
+                                    </Button>
+                                    <div className="flex items-center gap-2">
+                                        {seg.role && (
+                                            <Badge className="h-5 rounded-sm px-1.5 text-[10px]">
+                                                {seg.role === 'pred' ? 'Pred' : 'GT'}
+                                            </Badge>
+                                        )}
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="icon"
+                                            onClick={() =>
+                                                setSegs((prev) => {
+                                                    const next = prev.filter((_, i) => i !== idx)
+                                                    setExpandedSeg((e) =>
+                                                        e === null ? null : Math.min(e, next.length - 1)
+                                                    )
+                                                    return next
+                                                })
+                                            }
+                                            disabled={isUploading}
+                                        >
+                                            <Trash2 className="h-4 w-4" />
+                                        </Button>
+                                    </div>
                                 </div>
-                                <input
-                                    ref={segInputRef}
-                                    id="seg-file"
-                                    type="file"
-                                    accept=".nii,.gz,.mha,.mhd"
-                                    onChange={handleSegFileChange}
-                                    className="hidden"
-                                    disabled={isUploading}
-                                />
-                                <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => segInputRef.current?.click()}
-                                    disabled={isUploading}
-                                >
-                                    Browse Files
-                                </Button>
+                                {expandedSeg === idx && (
+                                    <>
+                                        <div className="flex items-center gap-2 min-w-0 w-full max-w-full overflow-hidden">
+                                            <input
+                                                ref={(el) => {
+                                                    segInputRefs.current[idx] = el
+                                                }}
+                                                type="file"
+                                                accept=".nii,.gz,.mha,.mhd"
+                                                onChange={(e) => updateSeg(idx, { file: e.target.files?.[0] ?? null })}
+                                                className="hidden"
+                                                disabled={isUploading}
+                                            />
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => segInputRefs.current[idx]?.click()}
+                                                disabled={isUploading}
+                                                className="shrink-0"
+                                            >
+                                                Choose file
+                                            </Button>
+                                            <span className="text-xs text-muted-foreground break-all min-w-0 flex-1 max-w-full">
+                                                {seg.file ? seg.file.name : 'No file selected'}
+                                            </span>
+                                        </div>
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <Label className="text-xs w-10">Name</Label>
+                                            <input
+                                                type="text"
+                                                value={seg.name}
+                                                onChange={(e) => updateSeg(idx, { name: e.target.value })}
+                                                className="flex-1 min-w-0 rounded-md border border-input bg-background px-2 py-1 text-xs"
+                                                disabled={isUploading}
+                                            />
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <Label className="text-xs w-10">Color</Label>
+                                            <input
+                                                type="color"
+                                                value={seg.color}
+                                                onChange={(e) => updateSeg(idx, { color: e.target.value })}
+                                                className="h-8 w-12 cursor-pointer rounded"
+                                                disabled={isUploading}
+                                            />
+                                            <div className="flex items-center gap-1">
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant={seg.role === 'gt' ? 'default' : 'outline'}
+                                                    onClick={() =>
+                                                        updateSeg(idx, { role: seg.role === 'gt' ? null : 'gt' })
+                                                    }
+                                                    disabled={isUploading}
+                                                >
+                                                    GT
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant={seg.role === 'pred' ? 'default' : 'outline'}
+                                                    onClick={() =>
+                                                        updateSeg(idx, { role: seg.role === 'pred' ? null : 'pred' })
+                                                    }
+                                                    disabled={isUploading}
+                                                >
+                                                    Pred
+                                                </Button>
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
                             </div>
-                        </div>
+                        ))}
+                        {segs.length < 10 && (
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="gap-2"
+                                onClick={addSegEntry}
+                                disabled={isUploading}
+                            >
+                                <Plus className="h-4 w-4" />
+                                {segs.length === 0 ? 'Add Segmentation' : `Add ${ordinal(segs.length + 1)} segmentation`}
+                            </Button>
+                        )}
                     </div>
 
                     {/* Upload Progress */}
@@ -426,7 +545,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                                 Clear
                             </Button>
                             <Button onClick={handleUpload} disabled={!canUpload}>
-                                {isUploading ? 'Uploading...' : 'Upload and Create Pair'}
+                                {isUploading ? 'Uploading...' : 'Upload'}
                             </Button>
                         </>
                     )}

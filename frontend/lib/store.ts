@@ -7,6 +7,9 @@ export interface SegVolumeEntry {
     volumeId: string
     colorMap: Map<number, string>
     visible?: boolean
+    mode?: 'filled' | 'boundary'
+    name?: string
+    role?: 'gt' | 'pred'
 }
 
 export interface PairState {
@@ -22,6 +25,7 @@ export interface PairState {
     zoom: number
     pan: { x: number; y: number }
     overlayVisible: boolean
+    /** @deprecated use segVolumes[i].mode */
     overlayMode: 'filled' | 'boundary'
     overlayOpacity: number
     /** @deprecated use segVolumes[0].colorMap */
@@ -32,10 +36,14 @@ const MAX_SEG_VOLUMES_PER_PAIR = 10
 
 export function getPairSegVolumes(pair: PairState): SegVolumeEntry[] {
     if (pair.segVolumes && pair.segVolumes.length > 0) {
-        return pair.segVolumes.map((s) => ({ ...s, visible: s.visible !== false }))
+        return pair.segVolumes.map((s) => ({
+            ...s,
+            visible: s.visible !== false,
+            mode: s.mode ?? 'filled',
+        }))
     }
     if (pair.segVolumeId && pair.colorMap)
-        return [{ volumeId: pair.segVolumeId, colorMap: pair.colorMap, visible: true }]
+        return [{ volumeId: pair.segVolumeId, colorMap: pair.colorMap, visible: true, mode: 'filled' }]
     return []
 }
 
@@ -45,8 +53,8 @@ export interface DatasetCaseState {
     caseCount: number
     caseId: string
     imageVolumeId: string
-    labelVolumeId: string | null
-    predVolumeId: string | null
+    segVolumes: { volumeId: string; role?: 'gt' | 'pred'; name?: string; allBackground?: boolean | null }[]
+    warnings?: string[]
 }
 
 interface ViewerState {
@@ -57,6 +65,7 @@ interface ViewerState {
     gridColumns: number
     viewMode: 'pairs' | 'dataset'
     datasetCase: DatasetCaseState | null
+    cleanDatasetMode: boolean
 
     // Actions
     addPair: (pair: PairState) => void
@@ -68,10 +77,11 @@ interface ViewerState {
     updatePairPan: (pairId: string, pan: { x: number; y: number }) => void
     updatePairOverlay: (pairId: string, updates: Partial<Pick<PairState, 'overlayVisible' | 'overlayMode' | 'overlayOpacity'>>) => void
     updatePairColorMap: (pairId: string, colorMap: Map<number, string>) => void
-    addSegToPair: (pairId: string, volumeId: string, colorMap?: Map<number, string>) => void
+    addSegToPair: (pairId: string, volumeId: string, colorMap?: Map<number, string>, name?: string, role?: 'gt' | 'pred') => void
     removeSegFromPair: (pairId: string, index: number) => void
     updateSegColorMap: (pairId: string, index: number, colorMap: Map<number, string>) => void
     updateSegVisible: (pairId: string, index: number, visible: boolean) => void
+    updateSegMode: (pairId: string, index: number, mode: 'filled' | 'boundary') => void
     resetPairView: (pairId: string) => void
     setSynchronized: (synchronized: boolean) => void
     setSnapToMask: (v: boolean) => void
@@ -80,6 +90,7 @@ interface ViewerState {
     updateAllPairsSlice: (sliceIndices: Map<string, number>) => void
     setViewMode: (mode: 'pairs' | 'dataset') => void
     setDatasetCase: (caseState: DatasetCaseState | null) => void
+    setCleanDatasetMode: (v: boolean) => void
 }
 
 const DEFAULT_WINDOW_LEVEL = 40
@@ -96,6 +107,7 @@ export const useViewerStore = create<ViewerState>((set) => ({
     gridColumns: 2,
     viewMode: 'pairs',
     datasetCase: null,
+    cleanDatasetMode: false,
 
     addPair: (pair) =>
         set((state) => {
@@ -184,7 +196,7 @@ export const useViewerStore = create<ViewerState>((set) => ({
             return { pairs: newPairs }
         }),
 
-    addSegToPair: (pairId, volumeId, colorMap) =>
+    addSegToPair: (pairId, volumeId, colorMap, name, role) =>
         set((state) => {
             const pair = state.pairs.get(pairId)
             if (!pair) return state
@@ -196,6 +208,9 @@ export const useViewerStore = create<ViewerState>((set) => ({
                 volumeId,
                 colorMap: colorMap ?? new Map([[1, defaultColor]]),
                 visible: true,
+                mode: 'filled',
+                name,
+                role,
             }
             newPairs.set(pairId, {
                 ...pair,
@@ -247,6 +262,18 @@ export const useViewerStore = create<ViewerState>((set) => ({
             return { pairs: newPairs }
         }),
 
+    updateSegMode: (pairId, index, mode) =>
+        set((state) => {
+            const pair = state.pairs.get(pairId)
+            if (!pair) return state
+            const segs = getPairSegVolumes(pair)
+            if (index < 0 || index >= segs.length) return state
+            const newPairs = new Map(state.pairs)
+            const newSegs = segs.map((s, i) => (i === index ? { ...s, mode } : s))
+            newPairs.set(pairId, { ...pair, segVolumes: newSegs })
+            return { pairs: newPairs }
+        }),
+
     resetPairView: (pairId) =>
         set((state) => {
             const pair = state.pairs.get(pairId)
@@ -288,4 +315,6 @@ export const useViewerStore = create<ViewerState>((set) => ({
     setViewMode: (mode) => set({ viewMode: mode }),
 
     setDatasetCase: (caseState) => set({ datasetCase: caseState }),
+
+    setCleanDatasetMode: (v) => set({ cleanDatasetMode: v }),
 }))

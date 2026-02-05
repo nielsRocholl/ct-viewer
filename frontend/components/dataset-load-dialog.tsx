@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { registerDataset, openDatasetCase } from '@/lib/api-client'
+import type { SegmentationDir, SegmentationVolumeInfo } from '@/lib/api-types'
 import { useViewerStore } from '@/lib/store'
 import {
     Dialog,
@@ -27,8 +28,7 @@ interface DatasetLoadDialogProps {
 export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
     const [open, setOpen] = useState(false)
     const [imagesDir, setImagesDir] = useState('')
-    const [labelsDir, setLabelsDir] = useState('')
-    const [predsDir, setPredsDir] = useState('')
+    const [segs, setSegs] = useState<SegmentationDir[]>([{ path: '', role: undefined, name: '' }])
 
     const setViewMode = useViewerStore((s) => s.setViewMode)
     const setDatasetCase = useViewerStore((s) => s.setDatasetCase)
@@ -57,27 +57,47 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
         try {
             const reg = await registerMutation.mutateAsync({
                 images_dir: images,
-                labels_dir: labelsDir.trim() || undefined,
-                preds_dir: predsDir.trim() || undefined,
+                segmentations: segs
+                    .map((s) => ({
+                        path: s.path.trim(),
+                        role: s.role,
+                        name: s.name?.trim() || undefined,
+                    }))
+                    .filter((s) => s.path),
             })
             const openRes = await openCaseMutation.mutateAsync({
                 datasetId: reg.dataset_id,
             })
             setViewMode('dataset')
+            const segVolumes =
+                openRes.seg_volume_ids?.map((s: SegmentationVolumeInfo) => ({
+                    volumeId: s.volume_id,
+                    role: s.role,
+                    name: s.name,
+                    allBackground: s.all_background ?? null,
+                })) ??
+                [
+                    ...(openRes.label_volume_id
+                        ? [{ volumeId: openRes.label_volume_id, role: 'gt' as const, name: 'Label', allBackground: openRes.label_all_background ?? null }]
+                        : []),
+                    ...(openRes.pred_volume_id
+                        ? [{ volumeId: openRes.pred_volume_id, role: 'pred' as const, name: 'Prediction', allBackground: null }]
+                        : []),
+                ]
             setDatasetCase({
                 datasetId: reg.dataset_id,
                 caseIndex: openRes.case_index,
                 caseCount: reg.case_count,
                 caseId: openRes.case_id,
                 imageVolumeId: openRes.image_volume_id,
-                labelVolumeId: openRes.label_volume_id ?? null,
-                predVolumeId: openRes.pred_volume_id ?? null,
+                segVolumes,
+                warnings: openRes.warnings ?? [],
             })
             setOpen(false)
             toast.success('Dataset loaded', {
                 description: `${reg.case_count} cases, viewing case 1`,
             })
-            if (openRes.label_all_background) {
+            if (segVolumes.some((s) => s.allBackground)) {
                 toast.info('Label is all background', {
                     description: `Case "${openRes.case_id}" has no segmentation foreground.`,
                 })
@@ -144,76 +164,113 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
                             />
                         )}
                     </div>
-                    <div className="space-y-2">
-                        <Label htmlFor="labels-dir">Labels directory (optional)</Label>
-                        {isElectron ? (
-                            <div className="flex gap-2 items-center">
+                    {segs.map((seg, idx) => (
+                        <div key={idx} className="space-y-2">
+                            <Label htmlFor={`seg-dir-${idx}`}>Segmentation {idx + 1} (optional)</Label>
+                            {isElectron ? (
+                                <div className="flex gap-2 items-center">
+                                    <Input
+                                        id={`seg-dir-${idx}`}
+                                        readOnly
+                                        placeholder="No folder chosen"
+                                        value={seg.path}
+                                        className="bg-muted"
+                                    />
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() =>
+                                            window.electronAPI?.showFolderPicker({ which: seg.role === 'pred' ? 'preds' : 'labels' }).then((p) => {
+                                                if (p) {
+                                                    const next = [...segs]
+                                                    next[idx] = { ...next[idx], path: p }
+                                                    setSegs(next)
+                                                }
+                                            })
+                                        }
+                                        disabled={isLoading}
+                                    >
+                                        Choose folder
+                                    </Button>
+                                </div>
+                            ) : (
                                 <Input
-                                    id="labels-dir"
-                                    readOnly
-                                    placeholder="No folder chosen"
-                                    value={labelsDir}
-                                    className="bg-muted"
+                                    id={`seg-dir-${idx}`}
+                                    placeholder="/path/to/segmentations"
+                                    value={seg.path}
+                                    onChange={(e) => {
+                                        const next = [...segs]
+                                        next[idx] = { ...next[idx], path: e.target.value }
+                                        setSegs(next)
+                                    }}
+                                    disabled={isLoading}
                                 />
+                            )}
+                            <div className="flex items-center gap-2">
+                                <Label className="text-xs w-10">Name</Label>
+                                <Input
+                                    value={seg.name ?? ''}
+                                    onChange={(e) => {
+                                        const next = [...segs]
+                                        next[idx] = { ...next[idx], name: e.target.value }
+                                        setSegs(next)
+                                    }}
+                                    disabled={isLoading}
+                                />
+                            </div>
+                            <div className="flex items-center gap-2">
                                 <Button
                                     type="button"
-                                    variant="outline"
                                     size="sm"
-                                    onClick={() =>
-                                        window.electronAPI?.showFolderPicker({ which: 'labels' }).then((p) => {
-                                            if (p) setLabelsDir(p)
-                                        })
-                                    }
+                                    variant={seg.role === 'gt' ? 'default' : 'outline'}
+                                    onClick={() => {
+                                        const next = [...segs]
+                                        next[idx] = { ...next[idx], role: seg.role === 'gt' ? undefined : 'gt' }
+                                        setSegs(next)
+                                    }}
                                     disabled={isLoading}
                                 >
-                                    Choose folder
+                                    GT
                                 </Button>
-                            </div>
-                        ) : (
-                            <Input
-                                id="labels-dir"
-                                placeholder="/path/to/labelsTr"
-                                value={labelsDir}
-                                onChange={(e) => setLabelsDir(e.target.value)}
-                                disabled={isLoading}
-                            />
-                        )}
-                    </div>
-                    <div className="space-y-2">
-                        <Label htmlFor="preds-dir">Predictions directory (optional)</Label>
-                        {isElectron ? (
-                            <div className="flex gap-2 items-center">
-                                <Input
-                                    id="preds-dir"
-                                    readOnly
-                                    placeholder="No folder chosen"
-                                    value={predsDir}
-                                    className="bg-muted"
-                                />
                                 <Button
                                     type="button"
-                                    variant="outline"
                                     size="sm"
-                                    onClick={() =>
-                                        window.electronAPI?.showFolderPicker({ which: 'preds' }).then((p) => {
-                                            if (p) setPredsDir(p)
-                                        })
-                                    }
+                                    variant={seg.role === 'pred' ? 'default' : 'outline'}
+                                    onClick={() => {
+                                        const next = [...segs]
+                                        next[idx] = { ...next[idx], role: seg.role === 'pred' ? undefined : 'pred' }
+                                        setSegs(next)
+                                    }}
                                     disabled={isLoading}
                                 >
-                                    Choose folder
+                                    Pred
                                 </Button>
+                                {segs.length > 1 && (
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => setSegs((prev) => prev.filter((_, i) => i !== idx))}
+                                        disabled={isLoading}
+                                    >
+                                        Remove
+                                    </Button>
+                                )}
                             </div>
-                        ) : (
-                            <Input
-                                id="preds-dir"
-                                placeholder="/path/to/preds"
-                                value={predsDir}
-                                onChange={(e) => setPredsDir(e.target.value)}
-                                disabled={isLoading}
-                            />
-                        )}
-                    </div>
+                        </div>
+                    ))}
+                    {segs.length < 5 && segs[0]?.path && (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setSegs((prev) => [...prev, { path: '', role: undefined, name: '' }])}
+                            disabled={isLoading}
+                        >
+                            Add segmentation
+                        </Button>
+                    )}
                 </div>
                 <div className="flex justify-end gap-2">
                     <Button variant="outline" onClick={() => setOpen(false)} disabled={isLoading}>

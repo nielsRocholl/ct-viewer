@@ -6,7 +6,10 @@
   "scripts": {
     "electron": "electron .",
     "electron:dev": "electron .",
-    "build:app": "electron-builder --mac"
+    "build:frontend": "NEXT_PUBLIC_API_URL=http://127.0.0.1:8000 npm --prefix frontend run build",
+    "build:backend": "backend/.venv-packaging/bin/python -m PyInstaller backend/ct_viewer_backend.spec --distpath backend/dist --workpath backend/build",
+    "build:app": "electron-builder --mac",
+    "dist": "npm run build:frontend && npm run build:backend && npm run build:app"
   },
   "build": {
     "appId": "com.ctviewer.app",
@@ -14,8 +17,31 @@
     "mac": {
       "category": "public.app-category.medical",
       "icon": "firefly-ct.ico",
-      "target": "dir"
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
     },
+    "files": [
+      "electron/**",
+      "frontend/out/**"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/dist/ct-viewer-backend",
+        "to": "ct-viewer-backend"
+      }
+    ],
     "directories": {
       "output": "dist"
     }

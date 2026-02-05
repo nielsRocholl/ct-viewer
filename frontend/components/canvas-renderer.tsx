@@ -49,6 +49,7 @@ export interface CanvasRendererProps {
     windowWidth: number
     width?: number
     height?: number
+    onSliceDimensions?: (dims: { width: number; height: number }) => void
 }
 
 function toRaw(P: number, windowLevel: number, windowWidth: number): number {
@@ -151,6 +152,14 @@ function buildLookup(colorMap: Map<number, string>, opacity: number): [number, n
     return out
 }
 
+function colorMapKey(colorMap: Map<number, string>): string {
+    let s = ''
+    colorMap.forEach((v, k) => {
+        s += `${k}:${v};`
+    })
+    return s
+}
+
 export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererProps>(function CanvasRenderer(
     {
         ctSliceUrl,
@@ -170,6 +179,7 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
         windowWidth,
         width = 512,
         height = 512,
+        onSliceDimensions,
     },
     ref
 ) {
@@ -178,6 +188,7 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
     const patchTempCanvasRef = useRef<HTMLCanvasElement | null>(null)
     const ctImageRef = useRef<HTMLImageElement | null>(null)
     const layerImageRefs = useRef<(HTMLImageElement | null)[]>([])
+    const layerCacheRef = useRef<{ key: string; canvas: HTMLCanvasElement }[]>([])
 
     const overlayLayers = useMemo((): OverlayLayerSpec[] => {
         if (overlayLayersProp && overlayLayersProp.length > 0)
@@ -215,6 +226,13 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
         () => overlayLayers.map((l) => buildLookup(l.colorMap, l.opacity)),
         [overlayLayers]
     )
+    const layerKeys = useMemo(
+        () =>
+            overlayLayers.map((l) =>
+                l.url ? `${l.url}|${l.opacity}|${colorMapKey(l.colorMap)}` : ''
+            ),
+        [overlayLayers]
+    )
 
     useImperativeHandle(
         ref,
@@ -248,13 +266,15 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
         const ctx = canvas.getContext('2d', { alpha: false })
         if (!ctx) return
 
-        // Create offscreen canvas for double-buffering if not exists
+        // Create or resize offscreen canvas for double-buffering
         if (!offscreenCanvasRef.current) {
             offscreenCanvasRef.current = document.createElement('canvas')
-            offscreenCanvasRef.current.width = width
-            offscreenCanvasRef.current.height = height
         }
         const offscreenCanvas = offscreenCanvasRef.current
+        if (offscreenCanvas.width !== width || offscreenCanvas.height !== height) {
+            offscreenCanvas.width = width
+            offscreenCanvas.height = height
+        }
         const offscreenCtx = offscreenCanvas.getContext('2d', { alpha: false })
         if (!offscreenCtx) return
         offscreenCtx.fillStyle = '#000000'
@@ -296,6 +316,9 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
         })
         if (anyCrisp) offscreenCtx.imageSmoothingEnabled = false
 
+        if (layerCacheRef.current.length < overlayLayers.length) {
+            layerCacheRef.current.length = overlayLayers.length
+        }
         overlayLayers.forEach((layer, idx) => {
             if (!layer.visible || !layer.url) return
             const img = layerImageRefs.current[idx]
@@ -303,30 +326,36 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
             const sw = img.naturalWidth || img.width
             const sh = img.naturalHeight || img.height
             const lookup = layerLookups[idx] ?? layerLookups[0]
-            const temp = document.createElement('canvas')
-            temp.width = sw
-            temp.height = sh
-            const tCtx = temp.getContext('2d', { willReadFrequently: true })
-            if (!tCtx) return
-            tCtx.drawImage(img, 0, 0)
-            const data = tCtx.getImageData(0, 0, sw, sh)
-            const d = data.data
-            for (let i = 0; i < d.length; i += 4) {
-                const label = d[i]
-                const [r, g, b, a] = lookup[label] ?? lookup[0]
-                d[i] = r
-                d[i + 1] = g
-                d[i + 2] = b
-                d[i + 3] = a
+            const key = layerKeys[idx] ?? ''
+            let cache = layerCacheRef.current[idx]
+            if (!cache || cache.key !== key || cache.canvas.width !== sw || cache.canvas.height !== sh) {
+                const temp = document.createElement('canvas')
+                temp.width = sw
+                temp.height = sh
+                const tCtx = temp.getContext('2d', { willReadFrequently: true })
+                if (!tCtx) return
+                tCtx.drawImage(img, 0, 0)
+                const data = tCtx.getImageData(0, 0, sw, sh)
+                const d = data.data
+                for (let i = 0; i < d.length; i += 4) {
+                    const label = d[i]
+                    const [r, g, b, a] = lookup[label] ?? lookup[0]
+                    d[i] = r
+                    d[i + 1] = g
+                    d[i + 2] = b
+                    d[i + 3] = a
+                }
+                tCtx.putImageData(data, 0, 0)
+                cache = { key, canvas: temp }
+                layerCacheRef.current[idx] = cache
             }
-            tCtx.putImageData(data, 0, 0)
-            offscreenCtx.drawImage(temp, 0, 0, sw, sh, drawX, drawY, drawW, drawH)
+            offscreenCtx.drawImage(cache.canvas, 0, 0, sw, sh, drawX, drawY, drawW, drawH)
         })
 
         if (anyCrisp) offscreenCtx.imageSmoothingEnabled = true
         offscreenCtx.restore()
         ctx.drawImage(offscreenCanvas, 0, 0)
-    }, [width, height, zoom, pan, overlayLayers, layerLookups])
+    }, [width, height, zoom, pan, overlayLayers, layerLookups, layerKeys])
 
     // Load CT image
     useEffect(() => {
@@ -337,6 +366,7 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
         const img = new Image()
         img.onload = () => {
             ctImageRef.current = img
+            onSliceDimensions?.({ width: img.naturalWidth, height: img.naturalHeight })
             renderCanvas()
         }
         img.onerror = () => {
@@ -344,7 +374,7 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
             ctImageRef.current = null
         }
         img.src = ctSliceUrl
-    }, [ctSliceUrl, renderCanvas])
+    }, [ctSliceUrl, renderCanvas, onSliceDimensions])
 
     // Load overlay layer images
     useEffect(() => {

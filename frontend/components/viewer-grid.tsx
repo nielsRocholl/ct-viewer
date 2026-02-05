@@ -52,10 +52,8 @@ export function ViewerGrid() {
         return (
             <div className="space-y-6">
                 <DatasetNav />
-                <div className="flex justify-center">
-                    <div className="w-full max-w-2xl">
-                        <DatasetViewerPanel />
-                    </div>
+                <div className="w-full max-w-[1800px] px-2">
+                    <DatasetViewerPanel />
                 </div>
             </div>
         )

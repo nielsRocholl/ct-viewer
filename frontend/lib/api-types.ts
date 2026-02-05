@@ -92,6 +92,7 @@ export interface RegisterDatasetRequest {
     images_dir: string
     labels_dir?: string
     preds_dir?: string
+    segmentations?: SegmentationDir[]
 }
 
 export interface RegisterDatasetResponse {
@@ -115,6 +116,21 @@ export interface OpenCaseResponse {
     label_all_background?: boolean | null
     pred_volume_id: string | null
     pred_metadata: VolumeMetadata | null
+    seg_volume_ids?: SegmentationVolumeInfo[]
+    warnings?: string[]
+}
+
+export interface SegmentationDir {
+    path: string
+    role?: 'gt' | 'pred'
+    name?: string
+}
+
+export interface SegmentationVolumeInfo {
+    volume_id: string
+    role?: 'gt' | 'pred'
+    name?: string
+    all_background?: boolean | null
 }
 
 export interface GetCasesResponse {
@@ -124,4 +140,20 @@ export interface GetCasesResponse {
 
 export interface FirstSliceWithMaskResponse {
     slice_index: number
+}
+
+export interface DatasetDecisionRequest {
+    case_id: string
+    decision: 'accept' | 'reject'
+}
+
+export interface DatasetDecisionResponse {
+    next_case_id: string | null
+    next_case_index: number | null
+    case_count: number
+    stats: {
+        accepted: number
+        rejected: number
+        remaining: number
+    }
 }

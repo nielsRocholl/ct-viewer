@@ -42,7 +42,8 @@ app = FastAPI(
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "null"],
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -185,10 +186,17 @@ class IndexToPhysicalResponse(BaseModel):
     physical_position: float
 
 
+class SegmentationDir(BaseModel):
+    path: str
+    role: Optional[str] = None  # "gt" | "pred"
+    name: Optional[str] = None
+
+
 class RegisterDatasetRequest(BaseModel):
     images_dir: str
     labels_dir: Optional[str] = None
     preds_dir: Optional[str] = None
+    segmentations: Optional[list[SegmentationDir]] = None
 
 
 class RegisterDatasetResponse(BaseModel):
@@ -202,6 +210,13 @@ class OpenCaseRequest(BaseModel):
     case_id: Optional[str] = None
 
 
+class SegmentationVolumeInfo(BaseModel):
+    volume_id: str
+    role: Optional[str] = None
+    name: Optional[str] = None
+    all_background: Optional[bool] = None
+
+
 class OpenCaseResponse(BaseModel):
     case_id: str
     case_index: int
@@ -212,11 +227,25 @@ class OpenCaseResponse(BaseModel):
     label_all_background: Optional[bool] = None  # True if label volume has no foreground voxels
     pred_volume_id: Optional[str] = None
     pred_metadata: Optional[VolumeMetadataResponse] = None
+    seg_volume_ids: list[SegmentationVolumeInfo] = []
+    warnings: list[str] = []
 
 
 class GetCasesResponse(BaseModel):
     case_count: int
     case_ids: list[str]
+
+
+class DatasetDecisionRequest(BaseModel):
+    case_id: str
+    decision: str  # "accept" | "reject"
+
+
+class DatasetDecisionResponse(BaseModel):
+    next_case_id: Optional[str] = None
+    next_case_index: Optional[int] = None
+    case_count: int
+    stats: dict
 
 
 def metadata_to_response(metadata: VolumeMetadata) -> VolumeMetadataResponse:
@@ -281,8 +310,11 @@ async def upload_volume(file: UploadFile = File(...)):
         
         # Save uploaded file to temporary location
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-            content = await file.read()
-            tmp_file.write(content)
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                tmp_file.write(chunk)
             tmp_path = tmp_file.name
         
         try:
@@ -382,14 +414,8 @@ async def create_pair(request: CreatePairRequest):
                     resampled_seg = resampler.resample_segmentation_to_ct(seg_volume, ct_volume)
                     resample_time = time.time() - resample_start
                     
-                    # Replace the segmentation volume with resampled version
-                    volume_loader._volumes[request.seg_volume_id] = resampled_seg
-                    
-                    # Update metadata
-                    seg_metadata.dimensions = resampled_seg.GetSize()
-                    seg_metadata.spacing = resampled_seg.GetSpacing()
-                    seg_metadata.origin = resampled_seg.GetOrigin()
-                    seg_metadata.direction = resampled_seg.GetDirection()
+                    volume_loader.replace_volume(request.seg_volume_id, resampled_seg)
+                    seg_metadata = volume_loader.get_metadata(request.seg_volume_id)
                     
                     resampled = True
                     logger.info(
@@ -492,11 +518,8 @@ async def add_segment_to_pair(pair_id: str, request: AddSegmentRequest):
                 ct_volume = volume_loader.get_volume(pair["ct_volume_id"])
                 seg_volume = volume_loader.get_volume(request.seg_volume_id)
                 resampled_seg = resampler.resample_segmentation_to_ct(seg_volume, ct_volume)
-                volume_loader._volumes[request.seg_volume_id] = resampled_seg
-                seg_metadata.dimensions = resampled_seg.GetSize()
-                seg_metadata.spacing = resampled_seg.GetSpacing()
-                seg_metadata.origin = resampled_seg.GetOrigin()
-                seg_metadata.direction = resampled_seg.GetDirection()
+                volume_loader.replace_volume(request.seg_volume_id, resampled_seg)
+                seg_metadata = volume_loader.get_metadata(request.seg_volume_id)
                 resampled = True
             else:
                 error_message = geometry_validator.format_validation_error(validation_result)
@@ -533,16 +556,50 @@ async def delete_pair(pair_id: str):
 async def register_dataset(request: RegisterDatasetRequest):
     """Register a dataset from server-side folders; scan only, no volume loading."""
     try:
+        segmentations: list[dict] = []
+        if request.segmentations:
+            for seg in request.segmentations:
+                role = seg.role.lower().strip() if seg.role else None
+                if role and role not in ("gt", "pred"):
+                    raise HTTPException(status_code=400, detail="segmentation role must be gt or pred")
+                segmentations.append({"path": seg.path, "role": role, "name": seg.name})
+        else:
+            if request.labels_dir:
+                segmentations.append({"path": request.labels_dir, "role": "gt", "name": "Label"})
+            if request.preds_dir:
+                segmentations.append({"path": request.preds_dir, "role": "pred", "name": "Prediction"})
+
         case_ids, cases = scan_dataset(
             request.images_dir,
             labels_dir=request.labels_dir,
             preds_dir=request.preds_dir,
+            segmentations=segmentations,
         )
         dataset_id = str(uuid.uuid4())
+        images_dir = request.images_dir
+        labels_dir = request.labels_dir
+        preds_dir = request.preds_dir
+        rejected_images_dir = f"{images_dir}_rejected"
+        rejected_labels_dir = f"{labels_dir}_rejected" if labels_dir else None
+        rejected_preds_dir = f"{preds_dir}_rejected" if preds_dir else None
+        rejected_segmentations = [
+            f"{seg['path']}_rejected" if seg.get("path") else None for seg in segmentations
+        ]
+        clean_log_path = os.path.join(images_dir, "clean_log.jsonl")
         datasets_storage[dataset_id] = {
             "case_ids": case_ids,
             "cases": cases,
             "last_opened_volume_ids": [],
+            "images_dir": images_dir,
+            "labels_dir": labels_dir,
+            "preds_dir": preds_dir,
+            "rejected_images_dir": rejected_images_dir,
+            "rejected_labels_dir": rejected_labels_dir,
+            "rejected_preds_dir": rejected_preds_dir,
+            "segmentations": segmentations,
+            "rejected_segmentations": rejected_segmentations,
+            "decisions": {},
+            "clean_log_path": clean_log_path,
         }
         logger.info(f"Registered dataset {dataset_id}: {len(case_ids)} cases")
         return RegisterDatasetResponse(
@@ -593,6 +650,7 @@ async def open_dataset_case(dataset_id: str, body: OpenCaseRequest):
     ds["last_opened_volume_ids"] = []
 
     entry = cases[case_id]
+    warnings: list[str] = []
     image_path = entry["image"]
     image_meta = await volume_loader.load_volume(image_path)
     ds["last_opened_volume_ids"].append(image_meta.volume_id)
@@ -600,20 +658,45 @@ async def open_dataset_case(dataset_id: str, body: OpenCaseRequest):
     label_meta = None
     pred_meta = None
     label_all_background = None
-    if "label" in entry:
-        label_meta = await volume_loader.load_volume(entry["label"])
-        ds["last_opened_volume_ids"].append(label_meta.volume_id)
+    seg_infos: list[SegmentationVolumeInfo] = []
+    segs = entry.get("segs", [])
+    for i, seg in enumerate(segs):
+        path = seg.get("path")
+        role = seg.get("role")
+        name = seg.get("name")
+        label = name or role or f"Segmentation {i + 1}"
+        if not path:
+            warnings.append(f"Missing segmentation for {label}")
+            continue
+        meta = await volume_loader.load_volume(path)
+        ds["last_opened_volume_ids"].append(meta.volume_id)
+        all_bg = None
         try:
-            label_vol = volume_loader.get_volume(label_meta.volume_id)
-            arr = np.asarray(sitk.GetArrayFromImage(label_vol))
-            label_all_background = bool(np.count_nonzero(arr) == 0)
+            seg_vol = volume_loader.get_volume(meta.volume_id)
+            arr = np.asarray(sitk.GetArrayFromImage(seg_vol))
+            all_bg = bool(np.count_nonzero(arr) == 0)
         except Exception as e:
-            logger.warning(f"Could not check label foreground: {e}")
-            label_all_background = None
-
-    if "pred" in entry:
-        pred_meta = await volume_loader.load_volume(entry["pred"])
-        ds["last_opened_volume_ids"].append(pred_meta.volume_id)
+            logger.warning(f"Could not check segmentation foreground: {e}")
+            all_bg = None
+        try:
+            validation = geometry_validator.validate_geometry(image_meta, meta)
+            if not validation.compatible:
+                warnings.append(f"{label}: {geometry_validator.format_validation_error(validation)}")
+        except Exception as e:
+            warnings.append(f"{label} geometry check failed: {e}")
+        if role == "gt" and label_meta is None:
+            label_meta = meta
+            label_all_background = all_bg
+        if role == "pred" and pred_meta is None:
+            pred_meta = meta
+        seg_infos.append(
+            SegmentationVolumeInfo(
+                volume_id=meta.volume_id,
+                role=role,
+                name=name,
+                all_background=all_bg,
+            )
+        )
 
     return OpenCaseResponse(
         case_id=case_id,
@@ -625,6 +708,102 @@ async def open_dataset_case(dataset_id: str, body: OpenCaseRequest):
         label_all_background=label_all_background,
         pred_volume_id=pred_meta.volume_id if pred_meta else None,
         pred_metadata=metadata_to_response(pred_meta) if pred_meta else None,
+        seg_volume_ids=seg_infos,
+        warnings=warnings,
+    )
+
+
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def _move_file(src: str, dst_dir: str) -> str:
+    _ensure_dir(dst_dir)
+    name = os.path.basename(src)
+    dst = os.path.join(dst_dir, name)
+    try:
+        os.rename(src, dst)
+    except OSError:
+        import shutil
+        shutil.move(src, dst)
+    return dst
+
+
+@app.post("/api/datasets/{dataset_id}/decision", response_model=DatasetDecisionResponse)
+async def submit_dataset_decision(dataset_id: str, body: DatasetDecisionRequest):
+    if dataset_id not in datasets_storage:
+        raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
+    ds = datasets_storage[dataset_id]
+    case_id = body.case_id
+    decision = body.decision.lower().strip()
+    if decision not in ("accept", "reject"):
+        raise HTTPException(status_code=400, detail="decision must be accept or reject")
+    if case_id not in ds["cases"]:
+        raise HTTPException(status_code=404, detail=f"Case not found: {case_id}")
+
+    entry = ds["cases"][case_id]
+    ds["decisions"][case_id] = decision
+    moved = {}
+
+    if decision == "reject":
+        try:
+            moved["image"] = _move_file(entry["image"], ds["rejected_images_dir"])
+            segs = entry.get("segs", [])
+            rej_segs = ds.get("rejected_segmentations", [])
+            for seg, rej_dir in zip(segs, rej_segs):
+                path = seg.get("path")
+                if path and rej_dir:
+                    moved[path] = _move_file(path, rej_dir)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to move rejected files: {e}")
+        ds["cases"].pop(case_id, None)
+        if case_id in ds["case_ids"]:
+            ds["case_ids"].remove(case_id)
+
+    log_path = ds.get("clean_log_path")
+    if log_path:
+        try:
+            import json
+            with open(log_path, "a") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "time": datetime.now().isoformat(),
+                            "case_id": case_id,
+                            "decision": decision,
+                            "moved": moved,
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to write clean log: {e}")
+
+    case_ids = ds["case_ids"]
+    next_case_id = None
+    next_case_index = None
+    if case_ids:
+        if decision == "accept" and case_id in case_ids:
+            cur = case_ids.index(case_id)
+            idx = cur + 1
+            if idx >= len(case_ids):
+                idx = None
+        else:
+            idx = case_ids.index(case_id) if case_id in case_ids else 0
+        if idx is not None:
+            next_case_index = idx
+            next_case_id = case_ids[idx]
+
+    stats = {
+        "accepted": sum(1 for d in ds["decisions"].values() if d == "accept"),
+        "rejected": sum(1 for d in ds["decisions"].values() if d == "reject"),
+        "remaining": len(case_ids),
+    }
+    return DatasetDecisionResponse(
+        next_case_id=next_case_id,
+        next_case_index=next_case_index,
+        case_count=len(case_ids),
+        stats=stats,
     )
 
 

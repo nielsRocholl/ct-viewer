@@ -1,13 +1,22 @@
 'use client'
 
 import { useCallback, useState, useEffect, useRef, useMemo } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 
 const CLICK_THRESHOLD_PX = 6
 import { useViewerStore, getPairSegVolumes } from '@/lib/store'
-import { useCTSlice, useSegmentationSlice, usePairMetadata, useAddSegmentToPair, useUploadVolume } from '@/lib/api-hooks'
+import {
+    queryKeys,
+    useCTSlice,
+    useSegmentationSlices,
+    usePairMetadata,
+    useAddSegmentToPair,
+    useUploadVolume,
+} from '@/lib/api-hooks'
 import { CanvasRenderer, type CanvasRendererHandle } from './canvas-renderer'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { Button } from './ui/button'
+import { Badge } from './ui/badge'
 import { Slider } from './ui/slider'
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
@@ -26,12 +35,13 @@ import {
     physicalToIndexFromMetadata,
     synchronizeAllPairs,
 } from '@/lib/synchronization'
-import { fetchWindowFromRoi } from '@/lib/api-client'
+import { fetchCTSlice, fetchWindowFromRoi } from '@/lib/api-client'
 import { downloadCanvasAsJpeg } from '@/lib/utils'
 import { VolumeInfoCard } from './volume-info-card'
 import { toast } from 'sonner'
 import { generateDefaultColorMap, DEFAULT_LABEL_COLOR } from '@/lib/color-utils'
 import type { OverlayLayerSpec } from './canvas-renderer'
+import { computePairHealth } from '@/lib/health'
 
 const WINDOW_ROI_RADIUS_MM = 20
 const WINDOW_SMOOTH_NEW = 0.7
@@ -41,6 +51,7 @@ export interface ViewerPanelProps {
 }
 
 export function ViewerPanel({ pairId }: ViewerPanelProps) {
+    const queryClient = useQueryClient()
     const pair = useViewerStore((state) => state.pairs.get(pairId))
     const synchronized = useViewerStore((state) => state.synchronized)
     const globalSlicePhysical = useViewerStore((state) => state.globalSlicePhysical)
@@ -54,6 +65,7 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     const addSegToPair = useViewerStore((state) => state.addSegToPair)
     const removeSegFromPair = useViewerStore((state) => state.removeSegFromPair)
     const updateSegVisible = useViewerStore((state) => state.updateSegVisible)
+    const updateSegMode = useViewerStore((state) => state.updateSegMode)
     const updateSegColorMap = useViewerStore((state) => state.updateSegColorMap)
     const resetPairView = useViewerStore((state) => state.resetPairView)
     const setGlobalSlicePhysical = useViewerStore((state) => state.setGlobalSlicePhysical)
@@ -169,16 +181,13 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
             format: 'png' as const,
         }
         : null
-    const segParams0 = baseSegParams && segVolumes[0] ? { ...baseSegParams, volume_id: segVolumes[0].volumeId } : null
-    const segParams1 = baseSegParams && segVolumes[1] ? { ...baseSegParams, volume_id: segVolumes[1].volumeId } : null
-    const segParams2 = baseSegParams && segVolumes[2] ? { ...baseSegParams, volume_id: segVolumes[2].volumeId } : null
-    const segParams3 = baseSegParams && segVolumes[3] ? { ...baseSegParams, volume_id: segVolumes[3].volumeId } : null
-    const segParams4 = baseSegParams && segVolumes[4] ? { ...baseSegParams, volume_id: segVolumes[4].volumeId } : null
-    const segParams5 = baseSegParams && segVolumes[5] ? { ...baseSegParams, volume_id: segVolumes[5].volumeId } : null
-    const segParams6 = baseSegParams && segVolumes[6] ? { ...baseSegParams, volume_id: segVolumes[6].volumeId } : null
-    const segParams7 = baseSegParams && segVolumes[7] ? { ...baseSegParams, volume_id: segVolumes[7].volumeId } : null
-    const segParams8 = baseSegParams && segVolumes[8] ? { ...baseSegParams, volume_id: segVolumes[8].volumeId } : null
-    const segParams9 = baseSegParams && segVolumes[9] ? { ...baseSegParams, volume_id: segVolumes[9].volumeId } : null
+    const segParams = baseSegParams
+        ? segVolumes.map((seg) => ({
+            ...baseSegParams,
+            volume_id: seg.volumeId,
+            mode: seg.mode ?? 'filled',
+        }))
+        : []
 
     const { data: ctSliceUrl, error: ctSliceError } = useCTSlice(
         pair
@@ -192,18 +201,9 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
             }
             : null
     )
-    const { data: segUrl0 } = useSegmentationSlice(segParams0)
-    const { data: segUrl1 } = useSegmentationSlice(segParams1)
-    const { data: segUrl2 } = useSegmentationSlice(segParams2)
-    const { data: segUrl3 } = useSegmentationSlice(segParams3)
-    const { data: segUrl4 } = useSegmentationSlice(segParams4)
-    const { data: segUrl5 } = useSegmentationSlice(segParams5)
-    const { data: segUrl6 } = useSegmentationSlice(segParams6)
-    const { data: segUrl7 } = useSegmentationSlice(segParams7)
-    const { data: segUrl8 } = useSegmentationSlice(segParams8)
-    const { data: segUrl9 } = useSegmentationSlice(segParams9)
-
-    const segSliceUrls = [segUrl0, segUrl1, segUrl2, segUrl3, segUrl4, segUrl5, segUrl6, segUrl7, segUrl8, segUrl9]
+    const segQueries = useSegmentationSlices(segParams)
+    const segSliceUrls = segQueries.map((q) => q.data ?? null)
+    const segErrors = segQueries.map((q) => (q.error instanceof Error ? q.error : null))
     const overlayLayers: OverlayLayerSpec[] =
         pair && segVolumes.length > 0
             ? segVolumes.map((seg, i) => ({
@@ -387,11 +387,11 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         [pairId, updatePairOverlay]
     )
 
-    const handleOverlayModeChange = useCallback(
-        (mode: 'filled' | 'boundary') => {
-            updatePairOverlay(pairId, { overlayMode: mode })
+    const handleMaskModeChange = useCallback(
+        (index: number, mode: 'filled' | 'boundary') => {
+            updateSegMode(pairId, index, mode)
         },
-        [pairId, updatePairOverlay]
+        [pairId, updateSegMode]
     )
 
     const handleColorChange = useCallback(
@@ -457,6 +457,70 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         }
     }, [pair, pairMetadata, pairId, updatePairSlice, maxSliceIndex])
 
+    useEffect(() => {
+        if (!pair) return
+        const maxIdx = maxSliceIndex - 1
+        if (maxIdx < 0) return
+        const base = {
+            volume_id: pair.ctVolumeId,
+            orientation: pair.orientation ?? 'axial',
+            window_level: pair.windowLevel,
+            window_width: pair.windowWidth,
+            format: 'png' as const,
+        }
+        const idxs = [pair.currentSliceIndex - 1, pair.currentSliceIndex + 1]
+        idxs.forEach((sliceIndex) => {
+            if (sliceIndex < 0 || sliceIndex > maxIdx) return
+            const params = { ...base, slice_index: sliceIndex }
+            queryClient.prefetchQuery({
+                queryKey: queryKeys.ctSlice(params),
+                queryFn: () => fetchCTSlice(params),
+                staleTime: 5 * 60 * 1000,
+                gcTime: 10 * 60 * 1000,
+            })
+        })
+    }, [
+        pair,
+        pair?.currentSliceIndex,
+        pair?.orientation,
+        pair?.windowLevel,
+        pair?.windowWidth,
+        pair?.ctVolumeId,
+        maxSliceIndex,
+        queryClient,
+    ])
+
+    const orientationLabel = { axial: 'Axial (Z)', sagittal: 'Sagittal (X)', coronal: 'Coronal (Y)' } as const
+    const health = useMemo(
+        () =>
+            computePairHealth(
+                pairMetadata?.ct_metadata,
+                pairMetadata?.seg_metadatas ?? (pairMetadata?.seg_metadata ? [pairMetadata.seg_metadata] : []),
+                ctSliceError ?? null,
+                segErrors
+            ),
+        [pairMetadata, ctSliceError, segErrors]
+    )
+    const healthBadgeClass =
+        health.status === 'red'
+            ? 'bg-red-500 text-white hover:bg-red-500'
+            : health.status === 'orange'
+                ? 'bg-amber-400 text-black hover:bg-amber-400'
+                : 'bg-emerald-500 text-white hover:bg-emerald-500'
+    const healthCounts = useMemo(
+        () =>
+            health.details.reduce(
+                (acc, d) => {
+                    if (d.status === 'red') acc.fail += 1
+                    else if (d.status === 'orange') acc.warn += 1
+                    else acc.pass += 1
+                    return acc
+                },
+                { pass: 0, warn: 0, fail: 0 }
+            ),
+        [health.details]
+    )
+
     if (!pair) {
         return (
             <Card>
@@ -467,38 +531,86 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         )
     }
 
-    const orientationLabel = { axial: 'Axial (Z)', sagittal: 'Sagittal (X)', coronal: 'Coronal (Y)' } as const
-
     return (
         <Card className="w-full">
             <CardHeader>
-                <CardTitle className="text-sm font-medium">
-                    Pair {pairId.slice(0, 8)}
-                </CardTitle>
+                <CardTitle className="text-sm font-medium">Pair {pairId.slice(0, 8)}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
                 <div className="mx-auto w-full max-w-[512px] space-y-4">
                     {pairMetadata && (
-                        <Popover open={volumeInfoOpen} onOpenChange={setVolumeInfoOpen}>
-                            <PopoverTrigger asChild>
-                                <Button variant="outline" size="sm" className="w-full text-xs">
-                                    Volume info
-                                </Button>
-                            </PopoverTrigger>
-                            <PopoverContent
-                                className="w-auto max-w-[90vw] min-w-[320px]"
-                                align="start"
-                                onInteractOutside={(e) => e.preventDefault()}
-                            >
-                                <VolumeInfoCard
-                                    volumes={[
-                                        { title: 'Image', meta: pairMetadata.ct_metadata },
-                                        { title: 'Label', meta: pairMetadata.seg_metadata },
-                                    ]}
-                                    onClose={() => setVolumeInfoOpen(false)}
-                                />
-                            </PopoverContent>
-                        </Popover>
+                        <div className="flex items-center gap-2">
+                            <Popover open={volumeInfoOpen} onOpenChange={setVolumeInfoOpen}>
+                                <PopoverTrigger asChild>
+                                    <Button variant="outline" size="sm" className="flex-1 text-xs">
+                                        Volume info
+                                    </Button>
+                                </PopoverTrigger>
+                                <PopoverContent
+                                    className="w-[var(--radix-popover-trigger-width)] max-w-[90vw] min-w-[320px]"
+                                    align="start"
+                                    onInteractOutside={(e) => e.preventDefault()}
+                                >
+                                    <VolumeInfoCard
+                                        volumes={[
+                                            { title: 'Image', meta: pairMetadata.ct_metadata },
+                                            { title: 'Label', meta: pairMetadata.seg_metadata },
+                                        ]}
+                                        onClose={() => setVolumeInfoOpen(false)}
+                                    />
+                                </PopoverContent>
+                            </Popover>
+                            <Popover>
+                                <PopoverTrigger asChild>
+                                    <button type="button" aria-label="Health status">
+                                        <Badge
+                                            className={`h-8 min-w-7 rounded-sm p-0 flex items-center justify-center text-xs font-semibold ${healthBadgeClass}`}
+                                        >
+                                            {health.status === 'red' ? 'F' : health.status === 'orange' ? 'W' : 'P'}
+                                        </Badge>
+                                    </button>
+                                </PopoverTrigger>
+                                <PopoverContent
+                                    className="w-[var(--radix-popover-trigger-width)] max-w-[90vw] min-w-[260px]"
+                                    align="end"
+                                >
+                                    <div className="space-y-3 text-xs">
+                                        <div className="space-y-2">
+                                            <div className="text-sm font-medium text-foreground">Health checks</div>
+                                            <div className="flex flex-wrap gap-2">
+                                                <Badge className="h-5 rounded-sm bg-emerald-500 px-2 py-0 text-[10px] text-white hover:bg-emerald-500">
+                                                    Pass {healthCounts.pass}
+                                                </Badge>
+                                                <Badge className="h-5 rounded-sm bg-amber-400 px-2 py-0 text-[10px] text-black hover:bg-amber-400">
+                                                    Warn {healthCounts.warn}
+                                                </Badge>
+                                                <Badge className="h-5 rounded-sm bg-red-500 px-2 py-0 text-[10px] text-white hover:bg-red-500">
+                                                    Fail {healthCounts.fail}
+                                                </Badge>
+                                            </div>
+                                        </div>
+                                        <div className="space-y-2 rounded-md border bg-muted/30 p-2">
+                                            {health.details.map((d, i) => (
+                                                <div key={`${d.label}-${i}`} className="flex items-start justify-between gap-3">
+                                                    <div className="space-y-0.5">
+                                                        <div className="text-foreground">{d.label}</div>
+                                                        <div className="text-muted-foreground">{d.message}</div>
+                                                    </div>
+                                                    <Badge
+                                                        className={`h-4 w-4 rounded-full p-0 ${d.status === 'red'
+                                                            ? 'bg-red-500 text-white'
+                                                            : d.status === 'orange'
+                                                                ? 'bg-amber-500 text-black'
+                                                                : 'bg-emerald-500 text-white'
+                                                            }`}
+                                                    />
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </PopoverContent>
+                            </Popover>
+                        </div>
                     )}
                     {/* Canvas Renderer */}
                     <div
@@ -655,11 +767,32 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                                 style={{ backgroundColor: seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR }}
                                 aria-hidden
                             />
-                            <Label className="text-xs shrink-0 w-14">Mask {i + 1}</Label>
+                            <Label className="text-xs shrink-0 w-20">
+                                {seg.name || `Mask ${i + 1}`}
+                            </Label>
+                            {seg.role && (
+                                <Badge
+                                    variant={seg.role === 'pred' ? 'secondary' : 'default'}
+                                    className="h-5 rounded-sm px-1.5 text-[10px]"
+                                >
+                                    {seg.role === 'pred' ? 'Pred' : 'GT'}
+                                </Badge>
+                            )}
                             <Switch
                                 checked={seg.visible !== false}
                                 onCheckedChange={(v) => updateSegVisible(pairId, i, v)}
                             />
+                            <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                    <Button variant="outline" size="sm">
+                                        {(seg.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
+                                    </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent>
+                                    <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'filled')}>Filled</DropdownMenuItem>
+                                    <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'boundary')}>Boundary</DropdownMenuItem>
+                                </DropdownMenuContent>
+                            </DropdownMenu>
                             <Popover>
                                 <PopoverTrigger asChild>
                                     <Button
@@ -694,33 +827,17 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                         </div>
                     ))}
                     {segVolumes.length > 0 && (
-                        <>
-                            <div className="space-y-2">
-                                <Label className="text-xs">Opacity: {(pair.overlayOpacity * 100).toFixed(0)}%</Label>
-                                <Slider
-                                    value={[pair.overlayOpacity]}
-                                    onValueChange={handleOverlayOpacityChange}
-                                    min={0}
-                                    max={1}
-                                    step={0.01}
-                                    className="w-full"
-                                />
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <Label className="text-xs">Mode:</Label>
-                                <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                        <Button variant="outline" size="sm">
-                                            {pair.overlayMode === 'filled' ? 'Filled' : 'Boundary'}
-                                        </Button>
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent>
-                                        <DropdownMenuItem onClick={() => handleOverlayModeChange('filled')}>Filled</DropdownMenuItem>
-                                        <DropdownMenuItem onClick={() => handleOverlayModeChange('boundary')}>Boundary</DropdownMenuItem>
-                                    </DropdownMenuContent>
-                                </DropdownMenu>
-                            </div>
-                        </>
+                        <div className="space-y-2">
+                            <Label className="text-xs">Opacity: {(pair.overlayOpacity * 100).toFixed(0)}%</Label>
+                            <Slider
+                                value={[pair.overlayOpacity]}
+                                onValueChange={handleOverlayOpacityChange}
+                                min={0}
+                                max={1}
+                                step={0.01}
+                                className="w-full"
+                            />
+                        </div>
                     )}
                     {segVolumes.length < 10 && (
                         <>

@@ -1,6 +1,6 @@
 // TanStack Query Hooks for API
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, useQueries } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
     uploadVolume,
@@ -181,6 +181,52 @@ export function useSegmentationSlice(params: SegmentationSliceParams | null) {
         gcTime: 10 * 60 * 1000, // 10 minutes - keep in cache longer
         retry: 2,
         retryDelay: 1000,
+    })
+}
+
+export function useSegmentationSlices(paramsList: (SegmentationSliceParams | null)[]) {
+    return useQueries({
+        queries: paramsList.map((params, idx) =>
+            params
+                ? {
+                    queryKey: queryKeys.segSlice(params),
+                    queryFn: () => fetchSegmentationSlice(params),
+                    enabled: true,
+                    staleTime: 5 * 60 * 1000,
+                    gcTime: 10 * 60 * 1000,
+                    retry: 2,
+                    retryDelay: 1000,
+                }
+                : {
+                    queryKey: ['seg-slice', 'null', idx],
+                    queryFn: async () => {
+                        throw new Error('Segmentation slice parameters are required')
+                    },
+                    enabled: false,
+                }
+        ),
+    })
+}
+
+export function useVolumeMetadatas(volumeIds: (string | null)[]) {
+    return useQueries({
+        queries: volumeIds.map((id, idx) =>
+            id
+                ? {
+                    queryKey: queryKeys.volume(id),
+                    queryFn: () => getVolumeMetadata(id),
+                    enabled: true,
+                    staleTime: 5 * 60 * 1000,
+                    gcTime: 10 * 60 * 1000,
+                }
+                : {
+                    queryKey: ['volume', 'null', idx],
+                    queryFn: async () => {
+                        throw new Error('Volume ID is required')
+                    },
+                    enabled: false,
+                }
+        ),
     })
 }
 

@@ -6,7 +6,7 @@ import { Button } from './ui/button'
 import { Slider } from './ui/slider'
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
-import { RotateCcw, Link, Unlink, Upload, FolderOpen } from 'lucide-react'
+import { RotateCcw, Link, Unlink, Upload, FolderOpen, Info } from 'lucide-react'
 import { AXIS_MAP, convertIndexToPhysical } from '@/lib/synchronization'
 import { fetchFirstSliceWithMask } from '@/lib/api-client'
 import type { ViewOrientation } from '@/lib/store'
@@ -50,6 +50,8 @@ export function GlobalControls() {
     const updatePairOrientation = useViewerStore((state) => state.updatePairOrientation)
     const resetPairView = useViewerStore((state) => state.resetPairView)
     const datasetCase = useViewerStore((state) => state.datasetCase)
+    const cleanDatasetMode = useViewerStore((state) => state.cleanDatasetMode)
+    const setCleanDatasetMode = useViewerStore((state) => state.setCleanDatasetMode)
     const gridColumns = useViewerStore((state) => state.gridColumns)
     const setGridColumns = useViewerStore((state) => state.setGridColumns)
     const viewMode = useViewerStore((state) => state.viewMode)
@@ -58,6 +60,9 @@ export function GlobalControls() {
 
     const [sliderValue, setSliderValue] = useState(0)
     const [syncDirectionDialogOpen, setSyncDirectionDialogOpen] = useState(false)
+    const [uploadInfoOpen, setUploadInfoOpen] = useState(false)
+    const [datasetInfoOpen, setDatasetInfoOpen] = useState(false)
+    const [cleanInfoOpen, setCleanInfoOpen] = useState(false)
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const rangeCacheRef = useRef<{ pairId: string; maxIdx: number; ori: ViewOrientation; range: PhysicalRange } | null>(null)
 
@@ -246,7 +251,62 @@ export function GlobalControls() {
                     >
                         Leave dataset mode
                     </Button>
-                    {datasetCase && (datasetCase.labelVolumeId ?? datasetCase.predVolumeId) && (
+                    <div className="flex min-h-9 items-center justify-between">
+                        <div className="flex items-center gap-2">
+                            <Label htmlFor="clean-dataset" className="cursor-pointer text-sm">
+                                Clean dataset mode
+                            </Label>
+                            <Dialog open={cleanInfoOpen} onOpenChange={setCleanInfoOpen}>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    onClick={() => setCleanInfoOpen(true)}
+                                    aria-label="Clean dataset mode info"
+                                >
+                                    <Info className="h-4 w-4" />
+                                </Button>
+                                <DialogContent className="sm:max-w-[520px]">
+                                    <DialogHeader>
+                                        <DialogTitle>Clean dataset mode</DialogTitle>
+                                    </DialogHeader>
+                                    <div className="space-y-3 text-sm text-muted-foreground">
+                                        <div>
+                                            <div className="font-medium text-foreground">Goal</div>
+                                            <div>Review each case and keep only the clean set without duplicating data.</div>
+                                        </div>
+                                        <div>
+                                            <div className="font-medium text-foreground">What happens</div>
+                                            <ul className="list-disc pl-5 space-y-1">
+                                                <li>Accepted cases stay in the original dataset folders.</li>
+                                                <li>
+                                                    Rejected cases are moved to sibling folders:
+                                                    <div className="mt-1 font-mono text-xs">
+                                                        images_rejected/<br />
+                                                    segmentations_rejected/
+                                                    </div>
+                                                </li>
+                                            </ul>
+                                        </div>
+                                        <div>
+                                            <div className="font-medium text-foreground">Why this works</div>
+                                            <ul className="list-disc pl-5 space-y-1">
+                                                <li>No duplicate data is created.</li>
+                                                <li>Rejected samples remain safely stored and recoverable.</li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </DialogContent>
+                            </Dialog>
+                        </div>
+                        <Switch
+                            id="clean-dataset"
+                            checked={cleanDatasetMode}
+                            onCheckedChange={setCleanDatasetMode}
+                        />
+                    </div>
+                    {datasetCase && datasetCase.segVolumes.length > 0 && (
                         <div className="flex min-h-9 items-center justify-between">
                             <Label htmlFor="snap-dataset" className="cursor-pointer text-sm">
                                 Snap to mask
@@ -262,24 +322,98 @@ export function GlobalControls() {
             ) : (
                 <>
                     <div className="flex min-h-9 w-full items-center">
-                        <FileUploadDialog
-                            trigger={
-                                <Button className="w-full gap-2" variant="outline">
-                                    <Upload className="h-4 w-4" />
-                                    Upload Pair
+                        <div className="flex w-full items-center gap-2">
+                            <FileUploadDialog
+                                trigger={
+                                    <Button className="w-full gap-2" variant="outline">
+                                        <Upload className="h-4 w-4" />
+                                        Upload Pair
+                                    </Button>
+                                }
+                            />
+                            <Dialog open={uploadInfoOpen} onOpenChange={setUploadInfoOpen}>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-9 w-9"
+                                    onClick={() => setUploadInfoOpen(true)}
+                                    aria-label="Upload pair info"
+                                >
+                                    <Info className="h-4 w-4" />
                                 </Button>
-                            }
-                        />
+                                <DialogContent className="sm:max-w-[520px]">
+                                    <DialogHeader>
+                                        <DialogTitle>Upload CT and Segmentation Pair</DialogTitle>
+                                    </DialogHeader>
+                                    <div className="space-y-3 text-sm text-muted-foreground">
+                                        <div>
+                                            <div className="font-medium text-foreground">Goal</div>
+                                            <div>Create a new CT + mask pair for viewing.</div>
+                                        </div>
+                                        <div>
+                                            <div className="font-medium text-foreground">What happens</div>
+                                            <ul className="list-disc pl-5 space-y-1">
+                                                <li>Upload one CT volume and up to 10 segmentation masks.</li>
+                                                <li>The CT and first mask create the pair.</li>
+                                                <li>Additional masks are added to the same pair automatically.</li>
+                                            </ul>
+                                        </div>
+                                        <div>
+                                            <div className="font-medium text-foreground">Formats</div>
+                                            <div className="font-mono text-xs">.nii, .nii.gz, .mha, .mhd</div>
+                                        </div>
+                                    </div>
+                                </DialogContent>
+                            </Dialog>
+                        </div>
                     </div>
                     <div className="flex min-h-9 w-full items-center">
-                        <DatasetLoadDialog
-                            trigger={
-                                <Button className="w-full gap-2" variant="outline">
-                                    <FolderOpen className="h-4 w-4" />
-                                    Load Dataset
+                        <div className="flex w-full items-center gap-2">
+                            <DatasetLoadDialog
+                                trigger={
+                                    <Button className="w-full gap-2" variant="outline">
+                                        <FolderOpen className="h-4 w-4" />
+                                        Load Dataset
+                                    </Button>
+                                }
+                            />
+                            <Dialog open={datasetInfoOpen} onOpenChange={setDatasetInfoOpen}>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-9 w-9"
+                                    onClick={() => setDatasetInfoOpen(true)}
+                                    aria-label="Load dataset info"
+                                >
+                                    <Info className="h-4 w-4" />
                                 </Button>
-                            }
-                        />
+                                <DialogContent className="sm:max-w-[520px]">
+                                    <DialogHeader>
+                                        <DialogTitle>Load Dataset</DialogTitle>
+                                    </DialogHeader>
+                                    <div className="space-y-3 text-sm text-muted-foreground">
+                                        <div>
+                                            <div className="font-medium text-foreground">Goal</div>
+                                            <div>Browse a dataset on disk and inspect cases one by one.</div>
+                                        </div>
+                                        <div>
+                                            <div className="font-medium text-foreground">What happens</div>
+                                            <ul className="list-disc pl-5 space-y-1">
+                                                <li>Images folder is required.</li>
+                                                <li>Labels and predictions are optional.</li>
+                                                <li>Cases are matched by base name (nnUNet naming supported).</li>
+                                            </ul>
+                                        </div>
+                                        <div>
+                                            <div className="font-medium text-foreground">Result</div>
+                                            <div>You can navigate cases and inspect CT, labels, and predictions.</div>
+                                        </div>
+                                    </div>
+                                </DialogContent>
+                            </Dialog>
+                        </div>
                     </div>
                 </>
             )}

@@ -17,12 +17,32 @@ function formatLoadedAt(loadedAt: string): string {
     }
 }
 
-function StatRow({ label, value }: { label: string; value: string }) {
+function middleEllipsis(value: string, head: number, tail: number): string {
+    if (value.length <= head + tail + 1) return value
+    return `${value.slice(0, head)}…${value.slice(-tail)}`
+}
+
+function StatRow({
+    label,
+    value,
+    displayValue,
+    hint,
+}: {
+    label: string
+    value: string
+    displayValue?: string
+    hint?: boolean
+}) {
     return (
         <div className="flex justify-between gap-4 py-1 text-xs">
             <span className="shrink-0 text-muted-foreground">{label}</span>
-            <span className="min-w-0 truncate text-right font-mono" title={value}>
-                {value}
+            <span
+                className={`min-w-0 truncate text-right font-mono ${
+                    hint ? 'cursor-help underline decoration-dotted underline-offset-2' : ''
+                }`}
+                title={value}
+            >
+                {displayValue ?? value}
             </span>
         </div>
     )
@@ -43,7 +63,12 @@ function VolumeSection({ title, meta }: VolumeEntry) {
                 <StatRow label="Dimensions" value={dimensions} />
                 <StatRow label="Spacing (mm)" value={spacing} />
                 <StatRow label="Origin (mm)" value={origin} />
-                <StatRow label="File" value={meta.file_name} />
+                <StatRow
+                    label="File"
+                    value={meta.file_name}
+                    displayValue={middleEllipsis(meta.file_name, 18, 14)}
+                    hint
+                />
                 <StatRow label="Volume ID" value={meta.volume_id} />
                 <StatRow label="Pixel type" value={meta.pixel_type} />
                 <StatRow label="Size" value={`${sizeKb} KB`} />

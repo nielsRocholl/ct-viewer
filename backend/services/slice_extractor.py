@@ -301,19 +301,14 @@ class SliceExtractorService:
     ) -> int:
         """Return the first slice index (along the given orientation) that has any non-zero voxel."""
         arr = np.asarray(sitk.GetArrayFromImage(volume))
-        axis = SliceExtractorService._get_axis_for_orientation(orientation)
-        n_slices = arr.shape[axis]
-        for i in range(n_slices):
-            if orientation == 'axial':
-                if np.any(arr[i, :, :] != 0):
-                    return i
-            elif orientation == 'sagittal':
-                if np.any(arr[:, :, i] != 0):
-                    return i
-            else:
-                if np.any(arr[:, i, :] != 0):
-                    return i
-        return 0
+        if orientation == 'axial':
+            has_fg = np.any(arr != 0, axis=(1, 2))
+        elif orientation == 'sagittal':
+            has_fg = np.any(arr != 0, axis=(0, 1))
+        else:
+            has_fg = np.any(arr != 0, axis=(0, 2))
+        idx = np.flatnonzero(has_fg)
+        return int(idx[0]) if idx.size else 0
 
     @staticmethod
     def _apply_window_level(
@@ -360,37 +355,18 @@ class SliceExtractorService:
         Returns:
             Binary array where 1 indicates boundary voxels
         """
-        # Create boundary mask
-        boundary = np.zeros_like(label_array, dtype=np.uint8)
-        
-        # Check for label changes in all 4 directions (up, down, left, right)
-        # A voxel is a boundary if it has a different label than any neighbor
-        
-        # Pad array to handle edges
         padded = np.pad(label_array, pad_width=1, mode='constant', constant_values=0)
-        
-        for i in range(label_array.shape[0]):
-            for j in range(label_array.shape[1]):
-                current_label = label_array[i, j]
-                
-                # Skip background (label 0)
-                if current_label == 0:
-                    continue
-                
-                # Check 4-connected neighbors in padded array
-                # (i+1, j+1) in padded corresponds to (i, j) in original
-                neighbors = [
-                    padded[i, j+1],      # left
-                    padded[i+2, j+1],    # right
-                    padded[i+1, j],      # top
-                    padded[i+1, j+2]     # bottom
-                ]
-                
-                # Mark as boundary if any neighbor is different
-                if any(n != current_label for n in neighbors):
-                    boundary[i, j] = current_label
-        
-        return boundary
+        center = padded[1:-1, 1:-1]
+        if center.size == 0:
+            return np.zeros_like(label_array, dtype=np.uint8)
+        left = padded[1:-1, :-2]
+        right = padded[1:-1, 2:]
+        top = padded[:-2, 1:-1]
+        bottom = padded[2:, 1:-1]
+        diff = (left != center) | (right != center) | (top != center) | (bottom != center)
+        boundary = (center != 0) & diff
+        out = np.where(boundary, center, 0)
+        return out.astype(label_array.dtype, copy=False)
     
     @staticmethod
     def _encode_as_png(array: np.ndarray) -> bytes:

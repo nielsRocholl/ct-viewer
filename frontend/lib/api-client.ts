@@ -20,6 +20,8 @@ import {
     OpenCaseResponse,
     GetCasesResponse,
     FirstSliceWithMaskResponse,
+    DatasetDecisionRequest,
+    DatasetDecisionResponse,
 } from './api-types'
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
@@ -258,6 +260,18 @@ export async function openDatasetCase(
         body: JSON.stringify(request),
     })
     return handleResponse<OpenCaseResponse>(response)
+}
+
+export async function submitDatasetDecision(
+    datasetId: string,
+    request: DatasetDecisionRequest
+): Promise<DatasetDecisionResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/datasets/${datasetId}/decision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+    })
+    return handleResponse<DatasetDecisionResponse>(response)
 }
 
 export async function fetchFirstSliceWithMask(
