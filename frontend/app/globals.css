@@ -117,3 +117,19 @@ body[data-electron] [data-sidebar="sidebar"] [data-sidebar="content"] {
     -webkit-app-region: no-drag;
     app-region: no-drag;
 }
+
+/* Truncate at start (show end of path/filename) with ellipsis on the left */
+.truncate-start {
+    direction: rtl;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.truncate-start>* {
+    direction: ltr;
+}
+
+input.truncate-start {
+    unicode-bidi: plaintext;
+}

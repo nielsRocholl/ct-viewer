@@ -166,6 +166,7 @@ export function useCTSlice(params: CTSliceParams | null) {
         gcTime: 10 * 60 * 1000, // 10 minutes - keep in cache longer
         retry: 2,
         retryDelay: 1000,
+        placeholderData: (previousData) => previousData,
     })
 }
 

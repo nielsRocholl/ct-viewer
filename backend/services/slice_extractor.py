@@ -311,6 +311,24 @@ class SliceExtractorService:
         return int(idx[0]) if idx.size else 0
 
     @staticmethod
+    def middle_slice_with_foreground(
+        volume: sitk.Image,
+        orientation: Literal['axial', 'sagittal', 'coronal'] = 'axial'
+    ) -> int:
+        """Return the slice index at the center of the mask extent along the given orientation."""
+        arr = np.asarray(sitk.GetArrayFromImage(volume))
+        if orientation == 'axial':
+            has_fg = np.any(arr != 0, axis=(1, 2))
+        elif orientation == 'sagittal':
+            has_fg = np.any(arr != 0, axis=(0, 1))
+        else:
+            has_fg = np.any(arr != 0, axis=(0, 2))
+        idx = np.flatnonzero(has_fg)
+        if idx.size == 0:
+            return 0
+        return int((int(idx[0]) + int(idx[-1])) // 2)
+
+    @staticmethod
     def _apply_window_level(
         array: np.ndarray,
         window_level: float,

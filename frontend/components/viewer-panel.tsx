@@ -18,6 +18,7 @@ import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Slider } from './ui/slider'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
 import {
@@ -27,21 +28,21 @@ import {
     DropdownMenuTrigger,
 } from './ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
-import { ZoomIn, ZoomOut, RotateCcw, Palette, Download, Plus, Trash2 } from 'lucide-react'
+import { ZoomIn, ZoomOut, RotateCcw, Palette, Download, Plus, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import {
     AXIS_MAP,
     convertIndexToPhysical,
     convertPhysicalToIndex,
     physicalToIndexFromMetadata,
-    synchronizeAllPairs,
 } from '@/lib/synchronization'
-import { fetchCTSlice, fetchWindowFromRoi } from '@/lib/api-client'
+import { fetchCTSlice, fetchSegmentationSlice, fetchWindowFromRoi } from '@/lib/api-client'
 import { downloadCanvasAsJpeg } from '@/lib/utils'
 import { VolumeInfoCard } from './volume-info-card'
 import { toast } from 'sonner'
 import { generateDefaultColorMap, DEFAULT_LABEL_COLOR } from '@/lib/color-utils'
 import type { OverlayLayerSpec } from './canvas-renderer'
 import { computePairHealth } from '@/lib/health'
+import { WINDOW_PRESETS } from '@/lib/window-presets'
 
 const WINDOW_ROI_RADIUS_MM = 20
 const WINDOW_SMOOTH_NEW = 0.7
@@ -55,6 +56,8 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     const pair = useViewerStore((state) => state.pairs.get(pairId))
     const synchronized = useViewerStore((state) => state.synchronized)
     const globalSlicePhysical = useViewerStore((state) => state.globalSlicePhysical)
+    const globalSliceNormalized = useViewerStore((state) => state.globalSliceNormalized)
+    const syncMode = useViewerStore((state) => state.syncMode)
     const updatePairSlice = useViewerStore((state) => state.updatePairSlice)
     const updatePairOrientation = useViewerStore((state) => state.updatePairOrientation)
     const updatePairWindowLevel = useViewerStore((state) => state.updatePairWindowLevel)
@@ -69,21 +72,33 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     const updateSegColorMap = useViewerStore((state) => state.updateSegColorMap)
     const resetPairView = useViewerStore((state) => state.resetPairView)
     const setGlobalSlicePhysical = useViewerStore((state) => state.setGlobalSlicePhysical)
-    const updateAllPairsSlice = useViewerStore((state) => state.updateAllPairsSlice)
+    const setGlobalSliceNormalized = useViewerStore((state) => state.setGlobalSliceNormalized)
+    const controlsExpanded = useViewerStore((state) => state.pairControlsExpanded.get(pairId) ?? true)
+    const setPairControlsExpanded = useViewerStore((state) => state.setPairControlsExpanded)
 
     const [isDragging, setIsDragging] = useState(false)
     const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
     const [mouseDownClient, setMouseDownClient] = useState<{ x: number; y: number } | null>(null)
     const [selectedColor, setSelectedColor] = useState<string>(DEFAULT_LABEL_COLOR)
+    const [presetId, setPresetId] = useState<string | null>(null)
     const [clickedXyz, setClickedXyz] = useState<{ x: number; y: number; z: number } | null>(null)
     const [clickedVoxel, setClickedVoxel] = useState<{ x: number; y: number; z: number } | null>(null)
     const canvasRendererRef = useRef<CanvasRendererHandle>(null)
+    const frameRef = useRef<HTMLDivElement>(null)
     const canvasContainerRef = useRef<HTMLDivElement>(null)
+    const [frameSize, setFrameSize] = useState({ width: 512, height: 512 })
     const lastSizeRef = useRef({ width: 512, height: 512 })
     const [canvasSize, setCanvasSize] = useState({ width: 512, height: 512 })
     const [isUpdatingFromSync, setIsUpdatingFromSync] = useState(false)
     const [volumeInfoOpen, setVolumeInfoOpen] = useState(false)
     const addMaskInputRef = useRef<HTMLInputElement>(null)
+
+    const [localWindowLevel, setLocalWindowLevel] = useState(pair?.windowLevel ?? 40)
+    const [localWindowWidth, setLocalWindowWidth] = useState(pair?.windowWidth ?? 400)
+    const windowPendingRef = useRef<{ level: number; width: number } | null>(null)
+    const windowThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const windowDraggingRef = useRef(false)
+    const WINDOW_THROTTLE_MS = 80
     const uploadVolumeMutation = useUploadVolume()
     const addSegmentMutation = useAddSegmentToPair()
 
@@ -127,7 +142,8 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     }, [pair?.currentSliceIndex])
 
     useEffect(() => {
-        if (!synchronized || globalSlicePhysical === null || syncingRef.current) return
+        if (!synchronized || (syncMode !== 'overlap' && syncMode !== 'reference')) return
+        if (globalSlicePhysical === null || syncingRef.current) return
         const currentPair = useViewerStore.getState().pairs.get(pairId)
         if (!currentPair) return
         if (pairMetadata?.ct_metadata) {
@@ -169,7 +185,25 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
             }
         }
         updateSliceFromPhysical()
-    }, [synchronized, globalSlicePhysical, pairId, updatePairSlice, pairMetadata?.ct_metadata, pair?.orientation])
+    }, [synchronized, syncMode, globalSlicePhysical, pairId, updatePairSlice, pairMetadata?.ct_metadata, pair?.orientation])
+
+    useEffect(() => {
+        if (!synchronized || syncMode !== 'union' || globalSliceNormalized === null || syncingRef.current) return
+        const currentPair = useViewerStore.getState().pairs.get(pairId)
+        if (!currentPair) return
+        const meta = pairMetadata?.ct_metadata ?? null
+        if (!meta) return
+        const ori = currentPair.orientation ?? 'axial'
+        const axis = AXIS_MAP[ori]
+        const maxIdx = meta.dimensions[axis] - 1
+        if (maxIdx <= 0) return
+        const sliceIndex = Math.round(globalSliceNormalized * maxIdx)
+        if (sliceIndex !== currentPair.currentSliceIndex) {
+            syncingRef.current = true
+            updatePairSlice(pairId, sliceIndex)
+            syncingRef.current = false
+        }
+    }, [synchronized, syncMode, globalSliceNormalized, pairId, updatePairSlice, pairMetadata?.ct_metadata])
 
     const orientation = pair?.orientation ?? 'axial'
     const segVolumes = useMemo(() => (pair ? getPairSegVolumes(pair) : []), [pair])
@@ -223,6 +257,21 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         }
     }, [ctSliceError])
 
+    useEffect(() => {
+        if (!pair || windowDraggingRef.current) return
+        setLocalWindowLevel(pair.windowLevel)
+        setLocalWindowWidth(pair.windowWidth)
+    }, [pair])
+
+    useEffect(() => {
+        return () => {
+            if (windowThrottleRef.current) {
+                clearTimeout(windowThrottleRef.current)
+                windowThrottleRef.current = null
+            }
+        }
+    }, [])
+
 
     const handleSliceChange = useCallback(
         async (value: number[]) => {
@@ -234,25 +283,19 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
             if (synchronized && !isUpdatingFromSync) {
                 try {
                     const ori = pair.orientation ?? 'axial'
-                    const physicalPosition = await convertIndexToPhysical(
-                        pairId,
-                        newSliceIndex,
-                        ori
-                    )
-
-                    setGlobalSlicePhysical(physicalPosition)
-
-                    const pairs = useViewerStore.getState().pairs
-                    const otherPairIds = Array.from(pairs.keys()).filter(
-                        (id) => id !== pairId
-                    )
-                    if (otherPairIds.length > 0) {
-                        const sliceIndices = await synchronizeAllPairs(
-                            otherPairIds,
-                            physicalPosition,
-                            ori
-                        )
-                        updateAllPairsSlice(sliceIndices)
+                    if (syncMode === 'union' && pairMetadata?.ct_metadata) {
+                        const axis = AXIS_MAP[ori]
+                        const maxIdx = pairMetadata.ct_metadata.dimensions[axis] - 1
+                        const frac = maxIdx > 0 ? newSliceIndex / maxIdx : 0
+                        setGlobalSliceNormalized(frac)
+                    } else {
+                        const meta = pairMetadata?.ct_metadata ?? null
+                        if (meta) {
+                            const axis = AXIS_MAP[ori]
+                            setGlobalSlicePhysical(meta.origin[axis] + meta.spacing[axis] * newSliceIndex)
+                        } else {
+                            setGlobalSlicePhysical(await convertIndexToPhysical(pairId, newSliceIndex, ori))
+                        }
                     }
                 } catch (error) {
                     console.error('Failed to synchronize slice change:', error)
@@ -267,29 +310,82 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
             pair,
             synchronized,
             isUpdatingFromSync,
+            syncMode,
             updatePairSlice,
             setGlobalSlicePhysical,
-            updateAllPairsSlice,
+            setGlobalSliceNormalized,
+            pairMetadata?.ct_metadata,
         ]
     )
 
+    const flushWindowToStore = useCallback(() => {
+        const p = windowPendingRef.current
+        if (pair && p) {
+            updatePairWindowLevel(pairId, p.level, p.width)
+        }
+        windowThrottleRef.current = null
+    }, [pairId, pair, updatePairWindowLevel])
+
+    const scheduleWindowFlush = useCallback(() => {
+        if (windowThrottleRef.current) return
+        windowThrottleRef.current = setTimeout(flushWindowToStore, WINDOW_THROTTLE_MS)
+    }, [flushWindowToStore])
+
     const handleWindowLevelChange = useCallback(
         (value: number[]) => {
-            if (pair) {
-                updatePairWindowLevel(pairId, value[0], pair.windowWidth)
+            if (!pair) return
+            const level = value[0]
+            setPresetId(null)
+            setLocalWindowLevel(level)
+            windowDraggingRef.current = true
+            windowPendingRef.current = {
+                ...(windowPendingRef.current ?? { level: pair.windowLevel, width: pair.windowWidth }),
+                level,
             }
+            scheduleWindowFlush()
         },
-        [pairId, pair, updatePairWindowLevel]
+        [pair, scheduleWindowFlush]
     )
 
     const handleWindowWidthChange = useCallback(
         (value: number[]) => {
-            if (pair) {
-                updatePairWindowLevel(pairId, pair.windowLevel, value[0])
+            if (!pair) return
+            const width = value[0]
+            setPresetId(null)
+            setLocalWindowWidth(width)
+            windowDraggingRef.current = true
+            windowPendingRef.current = {
+                ...(windowPendingRef.current ?? { level: pair.windowLevel, width: pair.windowWidth }),
+                width,
             }
+            scheduleWindowFlush()
         },
-        [pairId, pair, updatePairWindowLevel]
+        [pair, scheduleWindowFlush]
     )
+
+    const handleWindowLevelCommit = useCallback(() => {
+        if (windowThrottleRef.current) {
+            clearTimeout(windowThrottleRef.current)
+            windowThrottleRef.current = null
+        }
+        if (pair) {
+            updatePairWindowLevel(pairId, localWindowLevel, localWindowWidth)
+            windowPendingRef.current = null
+        }
+        windowDraggingRef.current = false
+    }, [pairId, pair, localWindowLevel, localWindowWidth, updatePairWindowLevel])
+
+    const handleWindowWidthCommit = useCallback(() => {
+        if (windowThrottleRef.current) {
+            clearTimeout(windowThrottleRef.current)
+            windowThrottleRef.current = null
+        }
+        if (pair) {
+            updatePairWindowLevel(pairId, localWindowLevel, localWindowWidth)
+            windowPendingRef.current = null
+        }
+        windowDraggingRef.current = false
+    }, [pairId, pair, localWindowLevel, localWindowWidth, updatePairWindowLevel])
 
     const handleZoomIn = useCallback(() => {
         if (pair) {
@@ -447,7 +543,56 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     }, [pair])
 
     const axis = AXIS_MAP[pair?.orientation ?? 'axial']
-    const maxSliceIndex = pairMetadata?.ct_metadata?.dimensions?.[axis] ?? 100
+    const dims = pairMetadata?.ct_metadata?.dimensions
+    const sp = pairMetadata?.ct_metadata?.spacing
+    const maxSliceIndex = dims?.[axis] ?? 100
+    const axialAspect = (() => {
+        if (!dims) return 1
+        const sx = (sp?.[0] ?? 1) * dims[0]
+        const sy = (sp?.[1] ?? 1) * dims[1]
+        return sx / sy
+    })()
+    const sliceAspect = (() => {
+        if (!dims) return 1
+        const sx = (sp?.[0] ?? 1) * dims[0]
+        const sy = (sp?.[1] ?? 1) * dims[1]
+        const sz = (sp?.[2] ?? 1) * dims[2]
+        if ((pair?.orientation ?? 'axial') === 'axial') return sx / sy
+        if ((pair?.orientation ?? 'axial') === 'sagittal') return sy / sz
+        return sx / sz
+    })()
+    const updateFrameSize = useCallback(() => {
+        const el = frameRef.current
+        if (!el) return
+        const availW = Math.max(1, el.clientWidth)
+        const maxH = Math.round(window.innerHeight * 0.7)
+        const baseH = Math.min(maxH, availW / axialAspect)
+        const h = Math.min(baseH, availW / sliceAspect)
+        const w = Math.max(1, Math.round(h * sliceAspect))
+        setFrameSize((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }))
+    }, [axialAspect, sliceAspect])
+
+    useEffect(() => {
+        updateFrameSize()
+    }, [updateFrameSize])
+
+    useEffect(() => {
+        const el = frameRef.current
+        if (!el) return
+        let rafId = 0
+        const ro = new ResizeObserver(() => {
+            if (rafId) cancelAnimationFrame(rafId)
+            rafId = requestAnimationFrame(() => {
+                rafId = 0
+                updateFrameSize()
+            })
+        })
+        ro.observe(el)
+        return () => {
+            if (rafId) cancelAnimationFrame(rafId)
+            ro.disconnect()
+        }
+    }, [updateFrameSize])
 
     useEffect(() => {
         if (!pair || !pairMetadata) return
@@ -489,6 +634,31 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         maxSliceIndex,
         queryClient,
     ])
+
+    useEffect(() => {
+        if (!pair || segVolumes.length === 0) return
+        const maxIdx = maxSliceIndex - 1
+        if (maxIdx < 0) return
+        const idxs = [pair.currentSliceIndex - 1, pair.currentSliceIndex + 1]
+        idxs.forEach((slice_index) => {
+            if (slice_index < 0 || slice_index > maxIdx) return
+            segVolumes.forEach((seg) => {
+                const params = {
+                    volume_id: seg.volumeId,
+                    slice_index,
+                    orientation: pair.orientation ?? 'axial',
+                    mode: seg.mode ?? 'filled',
+                    format: 'png' as const,
+                }
+                queryClient.prefetchQuery({
+                    queryKey: queryKeys.segSlice(params),
+                    queryFn: () => fetchSegmentationSlice(params),
+                    staleTime: 5 * 60 * 1000,
+                    gcTime: 10 * 60 * 1000,
+                })
+            })
+        })
+    }, [pair, segVolumes, maxSliceIndex, queryClient])
 
     const orientationLabel = { axial: 'Axial (Z)', sagittal: 'Sagittal (X)', coronal: 'Coronal (Y)' } as const
     const health = useMemo(
@@ -614,258 +784,310 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                     )}
                     {/* Canvas Renderer */}
                     <div
-                        ref={canvasContainerRef}
-                        className="relative w-full aspect-square min-h-0"
+                        ref={frameRef}
+                        className="mx-auto w-full flex items-center justify-center"
+                        style={{ minHeight: frameSize.height }}
                     >
                         <div
-                            className="absolute inset-0 cursor-move"
-                            onMouseDown={handleMouseDown}
-                            onMouseMove={handleMouseMove}
-                            onMouseUp={handleMouseUp}
-                            onMouseLeave={handleMouseUp}
+                            ref={canvasContainerRef}
+                            className="relative min-h-0"
+                            style={{ width: frameSize.width, height: frameSize.height }}
                         >
-                            <CanvasRenderer
-                                ref={canvasRendererRef}
-                                ctSliceUrl={ctSliceUrl ?? null}
-                                segmentationSliceUrl={null}
-                                overlayMode={pair.overlayMode}
-                                overlayOpacity={pair.overlayOpacity}
-                                overlayVisible={pair.overlayVisible}
-                                colorMap={pair.colorMap ?? new Map()}
-                                overlayLayers={overlayLayers}
-                                zoom={pair.zoom}
-                                pan={pair.pan}
-                                windowLevel={pair.windowLevel}
-                                windowWidth={pair.windowWidth}
-                                width={canvasSize.width}
-                                height={canvasSize.height}
-                            />
-                            {clickedXyz && clickedVoxel && (
-                                <div className="absolute top-2 right-2 text-xs font-mono bg-black/70 text-white px-2 py-1 rounded pointer-events-none space-y-0.5">
-                                    <div>physical: x {clickedXyz.x.toFixed(1)}  y {clickedXyz.y.toFixed(1)}  z {clickedXyz.z.toFixed(1)} mm</div>
-                                    <div>voxel: x {clickedVoxel.x}  y {clickedVoxel.y}  z {clickedVoxel.z}</div>
-                                </div>
-                            )}
+                            <div
+                                className="absolute inset-0 cursor-move"
+                                onMouseDown={handleMouseDown}
+                                onMouseMove={handleMouseMove}
+                                onMouseUp={handleMouseUp}
+                                onMouseLeave={handleMouseUp}
+                            >
+                                <CanvasRenderer
+                                    ref={canvasRendererRef}
+                                    ctSliceUrl={ctSliceUrl ?? null}
+                                    segmentationSliceUrl={null}
+                                    overlayMode={pair.overlayMode}
+                                    overlayOpacity={pair.overlayOpacity}
+                                    overlayVisible={pair.overlayVisible}
+                                    colorMap={pair.colorMap ?? new Map()}
+                                    overlayLayers={overlayLayers}
+                                    zoom={pair.zoom}
+                                    pan={pair.pan}
+                                    windowLevel={pair.windowLevel}
+                                    windowWidth={pair.windowWidth}
+                                    width={canvasSize.width}
+                                    height={canvasSize.height}
+                                />
+                                {clickedXyz && clickedVoxel && (
+                                    <div className="absolute top-2 right-2 text-xs font-mono bg-black/70 text-white px-2 py-1 rounded pointer-events-none space-y-0.5">
+                                        <div>physical: x {clickedXyz.x.toFixed(1)}  y {clickedXyz.y.toFixed(1)}  z {clickedXyz.z.toFixed(1)} mm</div>
+                                        <div>voxel: x {clickedVoxel.x}  y {clickedVoxel.y}  z {clickedVoxel.z}</div>
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                {/* Viewing direction toggle */}
-                <div className="flex min-h-9 items-center justify-center">
-                    <div className="inline-flex min-w-[14rem] rounded-xl border border-input bg-muted/30 p-0.5" role="group" aria-label="View orientation">
-                        {(['axial', 'sagittal', 'coronal'] as const).map((ori) => (
-                            <Button
-                                key={ori}
-                                variant={pair.orientation === ori ? 'default' : 'ghost'}
-                                size="sm"
-                                className="h-7 flex-1 rounded-lg px-3 text-xs"
-                                onClick={() => updatePairOrientation(pairId, ori)}
+                {/* Controls collapse toggle */}
+                <button
+                    type="button"
+                    className="flex w-full items-center justify-between gap-2 rounded-md border border-transparent py-2 px-1 text-left text-sm font-medium hover:bg-muted/50 hover:border-border transition-colors"
+                    onClick={() => setPairControlsExpanded(pairId, !controlsExpanded)}
+                    aria-expanded={controlsExpanded}
+                >
+                    <span>Controls</span>
+                    {controlsExpanded ? (
+                        <ChevronUp className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    ) : (
+                        <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    )}
+                </button>
+
+                {controlsExpanded && (
+                    <>
+                        {/* Viewing direction toggle */}
+                        <div className="flex min-h-9 items-center justify-center">
+                            <div className="inline-flex min-w-[14rem] rounded-xl border border-input bg-muted/30 p-0.5" role="group" aria-label="View orientation">
+                                {(['axial', 'sagittal', 'coronal'] as const).map((ori) => (
+                                    <Button
+                                        key={ori}
+                                        variant={pair.orientation === ori ? 'default' : 'ghost'}
+                                        size="sm"
+                                        className="h-7 flex-1 rounded-lg px-3 text-xs"
+                                        onClick={() => updatePairOrientation(pairId, ori)}
+                                    >
+                                        {orientationLabel[ori]}
+                                    </Button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Slice Navigation */}
+                        <div className="space-y-2">
+                            <div className="flex min-h-9 items-center gap-2">
+                                <Label className="text-xs shrink-0">
+                                    Slice: {pair.currentSliceIndex} / {maxSliceIndex - 1}
+                                </Label>
+                                <Slider
+                                    value={[pair.currentSliceIndex]}
+                                    onValueChange={handleSliceChange}
+                                    min={0}
+                                    max={maxSliceIndex - 1}
+                                    step={1}
+                                    className="flex-1"
+                                />
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={handleDownloadSlice}
+                                    className="shrink-0 gap-1.5"
+                                    aria-label="Download slice as JPEG"
+                                >
+                                    <Download className="h-4 w-4" />
+                                    Download
+                                </Button>
+                            </div>
+                        </div>
+
+                        {/* Window/Level Controls */}
+                        <div className="space-y-2">
+                            <p className="text-xs text-muted-foreground">Click on image to set level and width from that area.</p>
+                        </div>
+                        <div className="space-y-2">
+                            <Select
+                                value={presetId ?? ''}
+                                onValueChange={(val) => {
+                                    const preset = WINDOW_PRESETS.find((p) => p.id === val)
+                                    if (!preset || !pair) return
+                                    setPresetId(preset.id)
+                                    setLocalWindowLevel(preset.wl)
+                                    setLocalWindowWidth(preset.ww)
+                                    updatePairWindowLevel(pairId, preset.wl, preset.ww)
+                                }}
                             >
-                                {orientationLabel[ori]}
+                                <SelectTrigger>
+                                    <SelectValue placeholder="Window preset" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {WINDOW_PRESETS.map((p) => (
+                                        <SelectItem key={p.id} value={p.id}>
+                                            {p.label}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                                <Label className="text-xs">Window Level: {localWindowLevel}</Label>
+                                <Slider
+                                    value={[localWindowLevel]}
+                                    onValueChange={handleWindowLevelChange}
+                                    onValueCommit={handleWindowLevelCommit}
+                                    min={-1000}
+                                    max={1000}
+                                    step={1}
+                                    className="w-full"
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <Label className="text-xs">Window Width: {localWindowWidth}</Label>
+                                <Slider
+                                    value={[localWindowWidth]}
+                                    onValueChange={handleWindowWidthChange}
+                                    onValueCommit={handleWindowWidthCommit}
+                                    min={1}
+                                    max={2000}
+                                    step={1}
+                                    className="w-full"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Zoom Controls */}
+                        <div className="flex items-center gap-2">
+                            <Label className="text-xs">Zoom: {pair.zoom.toFixed(2)}x</Label>
+                            <Button
+                                variant="outline"
+                                size="icon"
+                                onClick={handleZoomOut}
+                                className="h-8 w-8"
+                            >
+                                <ZoomOut className="h-4 w-4" />
                             </Button>
-                        ))}
-                    </div>
-                </div>
+                            <Button
+                                variant="outline"
+                                size="icon"
+                                onClick={handleZoomIn}
+                                className="h-8 w-8"
+                            >
+                                <ZoomIn className="h-4 w-4" />
+                            </Button>
+                        </div>
 
-                {/* Slice Navigation */}
-                <div className="space-y-2">
-                    <div className="flex min-h-9 items-center gap-2">
-                        <Label className="text-xs shrink-0">
-                            Slice: {pair.currentSliceIndex} / {maxSliceIndex - 1}
-                        </Label>
-                        <Slider
-                            value={[pair.currentSliceIndex]}
-                            onValueChange={handleSliceChange}
-                            min={0}
-                            max={maxSliceIndex - 1}
-                            step={1}
-                            className="flex-1"
-                        />
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={handleDownloadSlice}
-                            className="shrink-0 gap-1.5"
-                            aria-label="Download slice as JPEG"
-                        >
-                            <Download className="h-4 w-4" />
-                            Download
-                        </Button>
-                    </div>
-                </div>
-
-                {/* Window/Level Controls */}
-                <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">Click on image to set level and width from that area.</p>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                        <Label className="text-xs">Window Level: {pair.windowLevel}</Label>
-                        <Slider
-                            value={[pair.windowLevel]}
-                            onValueChange={handleWindowLevelChange}
-                            min={-1000}
-                            max={1000}
-                            step={1}
-                            className="w-full"
-                        />
-                    </div>
-                    <div className="space-y-2">
-                        <Label className="text-xs">Window Width: {pair.windowWidth}</Label>
-                        <Slider
-                            value={[pair.windowWidth]}
-                            onValueChange={handleWindowWidthChange}
-                            min={1}
-                            max={2000}
-                            step={1}
-                            className="w-full"
-                        />
-                    </div>
-                </div>
-
-                {/* Zoom Controls */}
-                <div className="flex items-center gap-2">
-                    <Label className="text-xs">Zoom: {pair.zoom.toFixed(2)}x</Label>
-                    <Button
-                        variant="outline"
-                        size="icon"
-                        onClick={handleZoomOut}
-                        className="h-8 w-8"
-                    >
-                        <ZoomOut className="h-4 w-4" />
-                    </Button>
-                    <Button
-                        variant="outline"
-                        size="icon"
-                        onClick={handleZoomIn}
-                        className="h-8 w-8"
-                    >
-                        <ZoomIn className="h-4 w-4" />
-                    </Button>
-                </div>
-
-                {/* Masks / Overlay */}
-                <div className="space-y-3 border-t pt-3">
-                    {segVolumes.length > 1 && (
-                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                        {/* Masks / Overlay */}
+                        <div className="space-y-3 border-t pt-3">
+                            {segVolumes.length > 1 && (
+                                <div className="flex flex-wrap items-center gap-2 text-xs">
+                                    {segVolumes.map((seg, i) => (
+                                        <span key={i} className="flex items-center gap-1.5">
+                                            <span
+                                                className="h-2.5 w-2.5 rounded-sm border border-border shrink-0"
+                                                style={{ backgroundColor: seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR }}
+                                                aria-hidden
+                                            />
+                                            Mask {i + 1}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
                             {segVolumes.map((seg, i) => (
-                                <span key={i} className="flex items-center gap-1.5">
+                                <div key={i} className="flex items-center gap-2">
                                     <span
-                                        className="h-2.5 w-2.5 rounded-sm border border-border shrink-0"
+                                        className="h-3 w-3 rounded border border-border shrink-0"
                                         style={{ backgroundColor: seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR }}
                                         aria-hidden
                                     />
-                                    Mask {i + 1}
-                                </span>
-                            ))}
-                        </div>
-                    )}
-                    {segVolumes.map((seg, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                            <span
-                                className="h-3 w-3 rounded border border-border shrink-0"
-                                style={{ backgroundColor: seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR }}
-                                aria-hidden
-                            />
-                            <Label className="text-xs shrink-0 w-20">
-                                {seg.name || `Mask ${i + 1}`}
-                            </Label>
-                            {seg.role && (
-                                <Badge
-                                    variant={seg.role === 'pred' ? 'secondary' : 'default'}
-                                    className="h-5 rounded-sm px-1.5 text-[10px]"
-                                >
-                                    {seg.role === 'pred' ? 'Pred' : 'GT'}
-                                </Badge>
-                            )}
-                            <Switch
-                                checked={seg.visible !== false}
-                                onCheckedChange={(v) => updateSegVisible(pairId, i, v)}
-                            />
-                            <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
-                                    <Button variant="outline" size="sm">
-                                        {(seg.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
-                                    </Button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent>
-                                    <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'filled')}>Filled</DropdownMenuItem>
-                                    <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'boundary')}>Boundary</DropdownMenuItem>
-                                </DropdownMenuContent>
-                            </DropdownMenu>
-                            <Popover>
-                                <PopoverTrigger asChild>
-                                    <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        className="h-8 w-8 shrink-0"
-                                        onClick={() => setSelectedColor(seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR)}
-                                    >
-                                        <Palette className="h-4 w-4" />
-                                    </Button>
-                                </PopoverTrigger>
-                                <PopoverContent className="w-48">
-                                    <input
-                                        type="color"
-                                        value={selectedColor}
-                                        onChange={(e) => handleColorChange(e.target.value, i)}
-                                        className="w-full h-8 cursor-pointer rounded"
+                                    <Label className="text-xs shrink-0 min-w-[7rem] whitespace-nowrap">
+                                        {seg.name || `Mask ${i + 1}`}
+                                    </Label>
+                                    {seg.role && (
+                                        <Badge
+                                            variant={seg.role === 'pred' ? 'secondary' : 'default'}
+                                            className="h-5 rounded-sm px-1.5 text-[10px]"
+                                        >
+                                            {seg.role === 'pred' ? 'Pred' : 'GT'}
+                                        </Badge>
+                                    )}
+                                    <Switch
+                                        checked={seg.visible !== false}
+                                        onCheckedChange={(v) => updateSegVisible(pairId, i, v)}
                                     />
-                                </PopoverContent>
-                            </Popover>
-                            {segVolumes.length > 1 && (
-                                <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
-                                    onClick={() => removeSegFromPair(pairId, i)}
-                                    aria-label={`Remove mask ${i + 1}`}
-                                >
-                                    <Trash2 className="h-4 w-4" />
-                                </Button>
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                            <Button variant="outline" size="sm">
+                                                {(seg.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
+                                            </Button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent>
+                                            <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'filled')}>Filled</DropdownMenuItem>
+                                            <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'boundary')}>Boundary</DropdownMenuItem>
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                    <Popover>
+                                        <PopoverTrigger asChild>
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-8 w-8 shrink-0"
+                                                onClick={() => setSelectedColor(seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR)}
+                                            >
+                                                <Palette className="h-4 w-4" />
+                                            </Button>
+                                        </PopoverTrigger>
+                                        <PopoverContent className="w-48">
+                                            <input
+                                                type="color"
+                                                value={selectedColor}
+                                                onChange={(e) => handleColorChange(e.target.value, i)}
+                                                className="w-full h-8 cursor-pointer rounded"
+                                            />
+                                        </PopoverContent>
+                                    </Popover>
+                                    {segVolumes.length > 1 && (
+                                        <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                                            onClick={() => removeSegFromPair(pairId, i)}
+                                            aria-label={`Remove mask ${i + 1}`}
+                                        >
+                                            <Trash2 className="h-4 w-4" />
+                                        </Button>
+                                    )}
+                                </div>
+                            ))}
+                            {segVolumes.length > 0 && (
+                                <div className="space-y-2">
+                                    <Label className="text-xs">Opacity: {(pair.overlayOpacity * 100).toFixed(0)}%</Label>
+                                    <Slider
+                                        value={[pair.overlayOpacity]}
+                                        onValueChange={handleOverlayOpacityChange}
+                                        min={0}
+                                        max={1}
+                                        step={0.01}
+                                        className="w-full"
+                                    />
+                                </div>
+                            )}
+                            {segVolumes.length < 10 && (
+                                <>
+                                    <input
+                                        ref={addMaskInputRef}
+                                        type="file"
+                                        accept=".nii,.gz,.mha,.mhd"
+                                        className="hidden"
+                                        onChange={handleAddMask}
+                                    />
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="w-full gap-2"
+                                        onClick={() => addMaskInputRef.current?.click()}
+                                    >
+                                        <Plus className="h-4 w-4" />
+                                        Add mask
+                                    </Button>
+                                </>
                             )}
                         </div>
-                    ))}
-                    {segVolumes.length > 0 && (
-                        <div className="space-y-2">
-                            <Label className="text-xs">Opacity: {(pair.overlayOpacity * 100).toFixed(0)}%</Label>
-                            <Slider
-                                value={[pair.overlayOpacity]}
-                                onValueChange={handleOverlayOpacityChange}
-                                min={0}
-                                max={1}
-                                step={0.01}
-                                className="w-full"
-                            />
-                        </div>
-                    )}
-                    {segVolumes.length < 10 && (
-                        <>
-                            <input
-                                ref={addMaskInputRef}
-                                type="file"
-                                accept=".nii,.gz,.mha,.mhd"
-                                className="hidden"
-                                onChange={handleAddMask}
-                            />
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                className="w-full gap-2"
-                                onClick={() => addMaskInputRef.current?.click()}
-                            >
-                                <Plus className="h-4 w-4" />
-                                Add mask
-                            </Button>
-                        </>
-                    )}
-                </div>
 
-                {/* Reset Button */}
-                <Button variant="outline" onClick={handleReset} className="w-full">
-                    <RotateCcw className="h-4 w-4 mr-2" />
-                    Reset View
-                </Button>
+                        {/* Reset Button */}
+                        <Button variant="outline" onClick={handleReset} className="w-full">
+                            <RotateCcw className="h-4 w-4 mr-2" />
+                            Reset View
+                        </Button>
+                    </>
+                )}
             </CardContent>
         </Card>
     )

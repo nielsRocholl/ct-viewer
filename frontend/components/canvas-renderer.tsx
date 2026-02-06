@@ -187,7 +187,9 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
     const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null)
     const patchTempCanvasRef = useRef<HTMLCanvasElement | null>(null)
     const ctImageRef = useRef<HTMLImageElement | null>(null)
+    const ctLoadIdRef = useRef(0)
     const layerImageRefs = useRef<(HTMLImageElement | null)[]>([])
+    const layerLoadIdRef = useRef<number[]>([])
     const layerCacheRef = useRef<{ key: string; canvas: HTMLCanvasElement }[]>([])
 
     const overlayLayers = useMemo((): OverlayLayerSpec[] => {
@@ -359,17 +361,21 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
 
     // Load CT image
     useEffect(() => {
+        ctLoadIdRef.current += 1
+        const loadId = ctLoadIdRef.current
         if (!ctSliceUrl) {
             ctImageRef.current = null
             return
         }
         const img = new Image()
         img.onload = () => {
+            if (loadId !== ctLoadIdRef.current) return
             ctImageRef.current = img
             onSliceDimensions?.({ width: img.naturalWidth, height: img.naturalHeight })
             renderCanvas()
         }
         img.onerror = () => {
+            if (loadId !== ctLoadIdRef.current) return
             console.error('Failed to load CT slice')
             ctImageRef.current = null
         }
@@ -383,17 +389,26 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
             layerImageRefs.current.push(null)
         }
         layerImageRefs.current.length = n
+        while (layerLoadIdRef.current.length < n) {
+            layerLoadIdRef.current.push(0)
+        }
+        layerLoadIdRef.current.length = n
         overlayLayers.forEach((layer, i) => {
+            layerLoadIdRef.current[i] += 1
+            const loadId = layerLoadIdRef.current[i]
             if (!layer.url) {
                 layerImageRefs.current[i] = null
                 return
             }
+            layerImageRefs.current[i] = null
             const img = new Image()
             img.onload = () => {
+                if (loadId !== layerLoadIdRef.current[i]) return
                 layerImageRefs.current[i] = img
                 renderCanvas()
             }
             img.onerror = () => {
+                if (loadId !== layerLoadIdRef.current[i]) return
                 layerImageRefs.current[i] = null
                 renderCanvas()
             }

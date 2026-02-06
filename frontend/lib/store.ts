@@ -53,15 +53,27 @@ export interface DatasetCaseState {
     caseCount: number
     caseId: string
     imageVolumeId: string
-    segVolumes: { volumeId: string; role?: 'gt' | 'pred'; name?: string; allBackground?: boolean | null }[]
+    segVolumes: {
+        volumeId: string
+        role?: 'gt' | 'pred'
+        name?: string
+        allBackground?: boolean | null
+        color?: string
+        visible?: boolean
+        mode?: 'filled' | 'boundary'
+    }[]
     warnings?: string[]
 }
 
 interface ViewerState {
     pairs: Map<string, PairState>
+    pairControlsExpanded: Map<string, boolean>
     synchronized: boolean
     snapToMask: boolean
     globalSlicePhysical: number | null
+    globalSliceNormalized: number | null
+    syncMode: 'overlap' | 'union' | 'reference'
+    syncRefPairId: string | null
     gridColumns: number
     viewMode: 'pairs' | 'dataset'
     datasetCase: DatasetCaseState | null
@@ -86,11 +98,16 @@ interface ViewerState {
     setSynchronized: (synchronized: boolean) => void
     setSnapToMask: (v: boolean) => void
     setGlobalSlicePhysical: (position: number | null) => void
+    setGlobalSliceNormalized: (v: number | null) => void
+    setSyncMode: (mode: 'overlap' | 'union' | 'reference') => void
+    setSyncRefPairId: (pairId: string | null) => void
     setGridColumns: (n: number) => void
     updateAllPairsSlice: (sliceIndices: Map<string, number>) => void
     setViewMode: (mode: 'pairs' | 'dataset') => void
     setDatasetCase: (caseState: DatasetCaseState | null) => void
     setCleanDatasetMode: (v: boolean) => void
+    setPairControlsExpanded: (pairId: string, expanded: boolean) => void
+    setAllPairsControlsExpanded: (expanded: boolean) => void
 }
 
 const DEFAULT_WINDOW_LEVEL = 40
@@ -101,9 +118,13 @@ const DEFAULT_OVERLAY_OPACITY = 0.5
 
 export const useViewerStore = create<ViewerState>((set) => ({
     pairs: new Map(),
+    pairControlsExpanded: new Map(),
     synchronized: false,
     snapToMask: false,
     globalSlicePhysical: null,
+    globalSliceNormalized: null,
+    syncMode: 'overlap',
+    syncRefPairId: null,
     gridColumns: 2,
     viewMode: 'pairs',
     datasetCase: null,
@@ -298,6 +319,12 @@ export const useViewerStore = create<ViewerState>((set) => ({
 
     setGlobalSlicePhysical: (position) => set({ globalSlicePhysical: position }),
 
+    setGlobalSliceNormalized: (v) => set({ globalSliceNormalized: v }),
+
+    setSyncMode: (mode) => set({ syncMode: mode }),
+
+    setSyncRefPairId: (pairId) => set({ syncRefPairId: pairId }),
+
     setGridColumns: (n) => set({ gridColumns: Math.min(4, Math.max(1, n)) }),
 
     updateAllPairsSlice: (sliceIndices) =>
@@ -317,4 +344,18 @@ export const useViewerStore = create<ViewerState>((set) => ({
     setDatasetCase: (caseState) => set({ datasetCase: caseState }),
 
     setCleanDatasetMode: (v) => set({ cleanDatasetMode: v }),
+
+    setPairControlsExpanded: (pairId, expanded) =>
+        set((state) => {
+            const next = new Map(state.pairControlsExpanded)
+            next.set(pairId, expanded)
+            return { pairControlsExpanded: next }
+        }),
+
+    setAllPairsControlsExpanded: (expanded) =>
+        set((state) => {
+            const next = new Map<string, boolean>()
+            state.pairs.forEach((_, id) => next.set(id, expanded))
+            return { pairControlsExpanded: next }
+        }),
 }))

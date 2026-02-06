@@ -21,13 +21,9 @@ interface ThemeProviderProps {
 const ThemeProviderContext = createContext<ThemeProviderState | undefined>(undefined)
 
 function getInitialTheme(storageKey: string, defaultTheme: Theme): Theme {
-    if (typeof window === 'undefined') return defaultTheme
-    try {
-        const t = localStorage.getItem(storageKey) as Theme
-        return t && ['light', 'dark', 'system'].includes(t) ? t : defaultTheme
-    } catch {
-        return defaultTheme
-    }
+    void storageKey
+    void defaultTheme
+    return 'system'
 }
 
 function getInitialSystemTheme(): 'light' | 'dark' {
@@ -62,11 +58,11 @@ export function ThemeProvider({
 
     const setTheme = (newTheme: Theme) => {
         try {
-            localStorage.setItem(storageKey, newTheme)
+            localStorage.setItem(storageKey, 'system')
         } catch {
             // ignore
         }
-        setThemeState(newTheme)
+        setThemeState('system')
     }
 
     const resolvedTheme = theme === 'system' ? systemTheme : theme

@@ -13,10 +13,10 @@
   },
   "build": {
     "appId": "com.ctviewer.app",
-    "productName": "CT Segmentation Viewer",
+    "productName": "MangoCT",
     "mac": {
       "category": "public.app-category.medical",
-      "icon": "firefly-ct.ico",
+      "icon": "electron/assets/icon.icns",
       "target": [
         {
           "target": "dmg",

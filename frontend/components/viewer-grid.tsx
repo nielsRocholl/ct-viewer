@@ -63,12 +63,16 @@ export function ViewerGrid() {
         return (
             <div className="flex items-center justify-center min-h-[400px]">
                 <Card className="w-full max-w-md">
-                    <CardContent className="p-8 text-center">
-                        <p className="text-muted-foreground mb-4">
-                            No pairs loaded. Upload CT and segmentation files or load a dataset to get started.
+                    <CardContent className="p-8 text-center space-y-2">
+                        <p className="text-muted-foreground">
+                            No data loaded yet.
                         </p>
                         <p className="text-sm text-muted-foreground">
-                            You can load up to {MAX_PAIRS} pairs simultaneously.
+                            Use <span className="font-medium text-foreground">Upload</span> for single CT + masks,
+                            or <span className="font-medium text-foreground">Load dataset</span> for folders.
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                            Up to {MAX_PAIRS} pairs at once.
                         </p>
                     </CardContent>
                 </Card>

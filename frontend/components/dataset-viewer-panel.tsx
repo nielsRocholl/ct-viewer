@@ -1,20 +1,23 @@
 'use client'
 
-import { useCallback, useState, useEffect, useRef } from 'react'
+import { useCallback, useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useViewerStore } from '@/lib/store'
+import { useViewerStore, type DatasetCaseState } from '@/lib/store'
 import { queryKeys, useCTSlice, useSegmentationSlices, useVolumeMetadata, useVolumeMetadatas } from '@/lib/api-hooks'
 import { CanvasRenderer, type CanvasRendererHandle } from './canvas-renderer'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Slider } from './ui/slider'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
-import { ZoomIn, ZoomOut, RotateCcw, Download } from 'lucide-react'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './ui/dropdown-menu'
+import { ZoomIn, ZoomOut, RotateCcw, Download, Palette } from 'lucide-react'
 import { AXIS_MAP } from '@/lib/synchronization'
 import {
     fetchCTSlice,
+    fetchSegmentationSlice,
     openDatasetCase,
     fetchWindowFromRoi,
     fetchFirstSliceWithMask,
@@ -26,6 +29,7 @@ import { downloadCanvasAsJpeg } from '@/lib/utils'
 import { VolumeInfoCard } from './volume-info-card'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import { computePairHealth } from '@/lib/health'
+import { WINDOW_PRESETS } from '@/lib/window-presets'
 
 const CLICK_THRESHOLD_PX = 6
 const WINDOW_ROI_RADIUS_MM = 20
@@ -35,6 +39,20 @@ const DEFAULT_WINDOW_WIDTH = 400
 const DEFAULT_ZOOM = 1
 const DEFAULT_PAN = { x: 0, y: 0 }
 const DEFAULT_OVERLAY_OPACITY = 0.5
+
+type DatasetSeg = DatasetCaseState['segVolumes'][number]
+
+function mergeSegDisplay(prev: DatasetSeg[] | null | undefined, next: DatasetSeg[]): DatasetSeg[] {
+    return next.map((s, i) => ({
+        ...s,
+        color:
+            s.color ??
+            prev?.[i]?.color ??
+            (s.role === 'pred' ? DEFAULT_PRED_COLOR : generateDistinctColor(i, next.length)),
+        visible: s.visible ?? prev?.[i]?.visible ?? true,
+        mode: s.mode ?? prev?.[i]?.mode ?? 'filled',
+    }))
+}
 
 export function DatasetViewerPanel() {
     const queryClient = useQueryClient()
@@ -48,24 +66,57 @@ export function DatasetViewerPanel() {
     const [volumeInfoOpen, setVolumeInfoOpen] = useState(false)
     const [windowLevel, setWindowLevel] = useState(DEFAULT_WINDOW_LEVEL)
     const [windowWidth, setWindowWidth] = useState(DEFAULT_WINDOW_WIDTH)
+    const [localWindowLevel, setLocalWindowLevel] = useState(DEFAULT_WINDOW_LEVEL)
+    const [localWindowWidth, setLocalWindowWidth] = useState(DEFAULT_WINDOW_WIDTH)
+    const [presetId, setPresetId] = useState<string | null>(null)
+    const windowPendingRef = useRef<{ level: number; width: number } | null>(null)
+    const windowThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const windowDraggingRef = useRef(false)
+    const WINDOW_THROTTLE_MS = 80
     const [zoom, setZoom] = useState(DEFAULT_ZOOM)
     const [pan, setPan] = useState(DEFAULT_PAN)
-    const [overlayVisible, setOverlayVisible] = useState(true)
-    const [predictionVisible, setPredictionVisible] = useState(true)
     const [overlayOpacity, setOverlayOpacity] = useState(DEFAULT_OVERLAY_OPACITY)
     const [isDragging, setIsDragging] = useState(false)
     const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
     const [mouseDownClient, setMouseDownClient] = useState<{ x: number; y: number } | null>(null)
     const [clickedXyz, setClickedXyz] = useState<{ x: number; y: number; z: number } | null>(null)
     const [clickedVoxel, setClickedVoxel] = useState<{ x: number; y: number; z: number } | null>(null)
+    const frameRef = useRef<HTMLDivElement>(null)
     const canvasContainerRef = useRef<HTMLDivElement>(null)
+    const [frameSize, setFrameSize] = useState({ width: 512, height: 512 })
     const lastSizeRef = useRef({ width: 512, height: 512 })
     const [canvasSize, setCanvasSize] = useState({ width: 512, height: 512 })
-    const [sliceImageDims, setSliceImageDims] = useState<{ width: number; height: number } | null>(null)
     const canvasRendererRef = useRef<CanvasRendererHandle>(null)
-    const segList = datasetCase?.segVolumes ?? []
-    const hasPred = segList.some((s) => s.role === 'pred')
-    const hasLabel = segList.some((s) => s.role !== 'pred')
+    const segList = useMemo(() => datasetCase?.segVolumes ?? [], [datasetCase?.segVolumes])
+    const getSegColor = (seg: DatasetSeg, index: number) =>
+        seg.color ?? (seg.role === 'pred' ? DEFAULT_PRED_COLOR : generateDistinctColor(index, segList.length))
+
+    const updateSegVisible = useCallback(
+        (index: number, visible: boolean) => {
+            if (!datasetCase) return
+            const nextSegs = datasetCase.segVolumes.map((s, i) => (i === index ? { ...s, visible } : s))
+            setDatasetCase({ ...datasetCase, segVolumes: nextSegs })
+        },
+        [datasetCase, setDatasetCase]
+    )
+
+    const updateSegColor = useCallback(
+        (index: number, color: string) => {
+            if (!datasetCase) return
+            const nextSegs = datasetCase.segVolumes.map((s, i) => (i === index ? { ...s, color } : s))
+            setDatasetCase({ ...datasetCase, segVolumes: nextSegs })
+        },
+        [datasetCase, setDatasetCase]
+    )
+
+    const updateSegMode = useCallback(
+        (index: number, mode: 'filled' | 'boundary') => {
+            if (!datasetCase) return
+            const nextSegs = datasetCase.segVolumes.map((s, i) => (i === index ? { ...s, mode } : s))
+            setDatasetCase({ ...datasetCase, segVolumes: nextSegs })
+        },
+        [datasetCase, setDatasetCase]
+    )
 
     useEffect(() => {
         setSliceIndex(0)
@@ -77,7 +128,7 @@ export function DatasetViewerPanel() {
     const volumeId = segList.find((s) => s.role === 'gt')?.volumeId ?? segList[0]?.volumeId ?? null
     useEffect(() => {
         if (!snapToMask || !volumeId || !datasetCase) return
-        fetchFirstSliceWithMask(volumeId, orientation)
+        fetchFirstSliceWithMask(volumeId, orientation, true)
             .then((data) => setSliceIndex(data.slice_index))
             .catch(() => { })
     }, [snapToMask, datasetCase, volumeId, orientation])
@@ -126,7 +177,55 @@ export function DatasetViewerPanel() {
     const segMetas = segMetaQueries.map((q) => q.data ?? null)
     const axis = AXIS_MAP[orientation]
     const dims = imageMeta?.dimensions
+    const sp = imageMeta?.spacing
     const maxSliceIndex = dims?.[axis] != null ? dims[axis] - 1 : 0
+    const axialAspect = (() => {
+        if (!dims) return 1
+        const sx = (sp?.[0] ?? 1) * dims[0]
+        const sy = (sp?.[1] ?? 1) * dims[1]
+        return sx / sy
+    })()
+    const sliceAspect = (() => {
+        if (!dims) return 1
+        const sx = (sp?.[0] ?? 1) * dims[0]
+        const sy = (sp?.[1] ?? 1) * dims[1]
+        const sz = (sp?.[2] ?? 1) * dims[2]
+        if (orientation === 'axial') return sx / sy
+        if (orientation === 'sagittal') return sy / sz
+        return sx / sz
+    })()
+    const updateFrameSize = useCallback(() => {
+        const el = frameRef.current
+        if (!el) return
+        const availW = Math.max(1, el.clientWidth)
+        const maxH = Math.round(window.innerHeight * 0.7)
+        const baseH = Math.min(maxH, availW / axialAspect)
+        const h = Math.min(baseH, availW / sliceAspect)
+        const w = Math.max(1, Math.round(h * sliceAspect))
+        setFrameSize((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }))
+    }, [axialAspect, sliceAspect])
+
+    useEffect(() => {
+        updateFrameSize()
+    }, [updateFrameSize])
+
+    useEffect(() => {
+        const el = frameRef.current
+        if (!el) return
+        let rafId = 0
+        const ro = new ResizeObserver(() => {
+            if (rafId) cancelAnimationFrame(rafId)
+            rafId = requestAnimationFrame(() => {
+                rafId = 0
+                updateFrameSize()
+            })
+        })
+        ro.observe(el)
+        return () => {
+            if (rafId) cancelAnimationFrame(rafId)
+            ro.disconnect()
+        }
+    }, [updateFrameSize])
     useEffect(() => {
         if (sliceIndex > maxSliceIndex && maxSliceIndex >= 0) setSliceIndex(maxSliceIndex)
     }, [orientation, imageMeta?.dimensions, sliceIndex, maxSliceIndex])
@@ -143,14 +242,11 @@ export function DatasetViewerPanel() {
             }
             : null
     )
-    useEffect(() => {
-        setSliceImageDims(null)
-    }, [ctSliceUrl])
     const segParams = segList.map((s) => ({
         volume_id: s.volumeId,
         slice_index: sliceIndex,
         orientation,
-        mode: 'filled' as const,
+        mode: (s.mode ?? 'filled') as 'filled' | 'boundary',
         format: 'png' as const,
     }))
     const segQueries = useSegmentationSlices(segParams)
@@ -181,16 +277,116 @@ export function DatasetViewerPanel() {
         })
     }, [datasetCase, sliceIndex, orientation, windowLevel, windowWidth, maxSliceIndex, queryClient])
 
+    useEffect(() => {
+        if (!datasetCase || segList.length === 0) return
+        const maxIdx = maxSliceIndex
+        if (maxIdx < 0) return
+        const idxs = [sliceIndex - 1, sliceIndex + 1]
+        idxs.forEach((slice_index) => {
+            if (slice_index < 0 || slice_index > maxIdx) return
+            segList.forEach((s) => {
+                const params = {
+                    volume_id: s.volumeId,
+                    slice_index,
+                    orientation,
+                    mode: (s.mode ?? 'filled') as 'filled' | 'boundary',
+                    format: 'png' as const,
+                }
+                queryClient.prefetchQuery({
+                    queryKey: queryKeys.segSlice(params),
+                    queryFn: () => fetchSegmentationSlice(params),
+                    staleTime: 5 * 60 * 1000,
+                    gcTime: 10 * 60 * 1000,
+                })
+            })
+        })
+    }, [datasetCase, segList, sliceIndex, orientation, maxSliceIndex, queryClient])
+
+    useEffect(() => {
+        if (!windowDraggingRef.current) {
+            setLocalWindowLevel(windowLevel)
+            setLocalWindowWidth(windowWidth)
+        }
+    }, [windowLevel, windowWidth])
+
+    useEffect(() => {
+        return () => {
+            if (windowThrottleRef.current) {
+                clearTimeout(windowThrottleRef.current)
+                windowThrottleRef.current = null
+            }
+        }
+    }, [])
+
     const handleSliceChange = useCallback((value: number[]) => {
         setSliceIndex(value[0])
     }, [])
 
-    const handleWindowLevelChange = useCallback((value: number[]) => {
-        setWindowLevel(value[0])
+    const flushWindowToStore = useCallback(() => {
+        const p = windowPendingRef.current
+        if (p) {
+            setWindowLevel(p.level)
+            setWindowWidth(p.width)
+        }
+        windowThrottleRef.current = null
     }, [])
-    const handleWindowWidthChange = useCallback((value: number[]) => {
-        setWindowWidth(value[0])
-    }, [])
+
+    const scheduleWindowFlush = useCallback(() => {
+        if (windowThrottleRef.current) return
+        windowThrottleRef.current = setTimeout(flushWindowToStore, WINDOW_THROTTLE_MS)
+    }, [flushWindowToStore])
+
+    const handleWindowLevelChange = useCallback(
+        (value: number[]) => {
+            const level = value[0]
+            setPresetId(null)
+            setLocalWindowLevel(level)
+            windowDraggingRef.current = true
+            windowPendingRef.current = {
+                ...(windowPendingRef.current ?? { level: windowLevel, width: windowWidth }),
+                level,
+            }
+            scheduleWindowFlush()
+        },
+        [windowLevel, windowWidth, scheduleWindowFlush]
+    )
+
+    const handleWindowWidthChange = useCallback(
+        (value: number[]) => {
+            const width = value[0]
+            setPresetId(null)
+            setLocalWindowWidth(width)
+            windowDraggingRef.current = true
+            windowPendingRef.current = {
+                ...(windowPendingRef.current ?? { level: windowLevel, width: windowWidth }),
+                width,
+            }
+            scheduleWindowFlush()
+        },
+        [windowLevel, windowWidth, scheduleWindowFlush]
+    )
+
+    const handleWindowLevelCommit = useCallback(() => {
+        if (windowThrottleRef.current) {
+            clearTimeout(windowThrottleRef.current)
+            windowThrottleRef.current = null
+        }
+        setWindowLevel(localWindowLevel)
+        setWindowWidth(localWindowWidth)
+        windowPendingRef.current = null
+        windowDraggingRef.current = false
+    }, [localWindowLevel, localWindowWidth])
+
+    const handleWindowWidthCommit = useCallback(() => {
+        if (windowThrottleRef.current) {
+            clearTimeout(windowThrottleRef.current)
+            windowThrottleRef.current = null
+        }
+        setWindowLevel(localWindowLevel)
+        setWindowWidth(localWindowWidth)
+        windowPendingRef.current = null
+        windowDraggingRef.current = false
+    }, [localWindowLevel, localWindowWidth])
 
     const handleZoomIn = useCallback(() => setZoom((z) => Math.min(z * 1.2, 10)), [])
     const handleZoomOut = useCallback(() => setZoom((z) => Math.max(z / 1.2, 0.1)), [])
@@ -281,7 +477,7 @@ export function DatasetViewerPanel() {
                     const next = await openDatasetCase(datasetCase.datasetId, {
                         case_id: res.next_case_id,
                     })
-                    const segVolumes =
+                    const segVolumesRaw =
                         next.seg_volume_ids?.map((s) => ({
                             volumeId: s.volume_id,
                             role: s.role,
@@ -296,6 +492,7 @@ export function DatasetViewerPanel() {
                                 ? [{ volumeId: next.pred_volume_id, role: 'pred' as const, name: 'Prediction', allBackground: null }]
                                 : []),
                         ]
+                    const segVolumes = mergeSegDisplay(datasetCase.segVolumes, segVolumesRaw)
                     setDatasetCase({
                         datasetId: datasetCase.datasetId,
                         caseIndex: next.case_index,
@@ -385,8 +582,8 @@ export function DatasetViewerPanel() {
                             </div>
                         )}
                         <div className="w-full space-y-4">
-                    {(imageMeta || segMetas.some((m) => m)) && (
-                        <div className="flex items-center gap-2">
+                            {(imageMeta || segMetas.some((m) => m)) && (
+                                <div className="flex items-center gap-2">
                                     <Popover open={volumeInfoOpen} onOpenChange={setVolumeInfoOpen}>
                                         <PopoverTrigger asChild>
                                             <Button variant="outline" size="sm" className="flex-1 text-xs">
@@ -398,19 +595,19 @@ export function DatasetViewerPanel() {
                                             align="start"
                                             onInteractOutside={(e) => e.preventDefault()}
                                         >
-                                    <VolumeInfoCard
-                                        volumes={[
-                                            ...(imageMeta ? [{ title: 'Image', meta: imageMeta }] : []),
-                                            ...segMetas.flatMap((m, i) => {
-                                                if (!m) return []
-                                                const role = segList[i]?.role
-                                                const name = segList[i]?.name
-                                                const title = name || (role === 'pred' ? 'Prediction' : 'Label')
-                                                return [{ title, meta: m }]
-                                            }),
-                                        ]}
-                                        onClose={() => setVolumeInfoOpen(false)}
-                                    />
+                                            <VolumeInfoCard
+                                                volumes={[
+                                                    ...(imageMeta ? [{ title: 'Image', meta: imageMeta }] : []),
+                                                    ...segMetas.flatMap((m, i) => {
+                                                        if (!m) return []
+                                                        const role = segList[i]?.role
+                                                        const name = segList[i]?.name
+                                                        const title = name || (role === 'pred' ? 'Prediction' : 'Label')
+                                                        return [{ title, meta: m }]
+                                                    }),
+                                                ]}
+                                                onClose={() => setVolumeInfoOpen(false)}
+                                            />
                                         </PopoverContent>
                                     </Popover>
                                     <Popover>
@@ -466,13 +663,14 @@ export function DatasetViewerPanel() {
                                 </div>
                             )}
                             <div
-                                className="mx-auto w-full"
-                                style={sliceImageDims ? { maxWidth: `min(100%, calc(70vh * ${sliceImageDims.width} / ${sliceImageDims.height}))` } : undefined}
+                                ref={frameRef}
+                                className="mx-auto w-full flex items-center justify-center"
+                                style={{ minHeight: frameSize.height }}
                             >
                                 <div
                                     ref={canvasContainerRef}
-                                    className="relative w-full min-h-0"
-                                    style={{ aspectRatio: sliceImageDims ? `${sliceImageDims.width} / ${sliceImageDims.height}` : '1' }}
+                                    className="relative min-h-0"
+                                    style={{ width: frameSize.width, height: frameSize.height }}
                                 >
                                     <div
                                         className="absolute inset-0 cursor-move"
@@ -481,33 +679,26 @@ export function DatasetViewerPanel() {
                                         onMouseUp={handleMouseUp}
                                         onMouseLeave={handleMouseUp}
                                     >
-                                    <CanvasRenderer
-                                        ref={canvasRendererRef}
-                                        ctSliceUrl={ctSliceUrl ?? null}
-                                        segmentationSliceUrl={null}
-                                        overlayMode="filled"
-                                        overlayOpacity={overlayOpacity}
-                                        overlayVisible={overlayVisible}
-                                        colorMap={new Map()}
-                                        overlayLayers={segList.map((s, i) => {
-                                            const color =
-                                                s.role === 'pred'
-                                                    ? DEFAULT_PRED_COLOR
-                                                    : generateDistinctColor(i, segList.length)
-                                            return {
+                                        <CanvasRenderer
+                                            ref={canvasRendererRef}
+                                            ctSliceUrl={ctSliceUrl ?? null}
+                                            segmentationSliceUrl={null}
+                                            overlayMode="filled"
+                                            overlayOpacity={overlayOpacity}
+                                            overlayVisible={segList.some((s) => s.visible !== false)}
+                                            colorMap={new Map()}
+                                            overlayLayers={segList.map((s, i) => ({
                                                 url: segSliceUrls[i] ?? null,
-                                                colorMap: new Map([[1, color]]),
+                                                colorMap: new Map([[1, getSegColor(s, i)]]),
                                                 opacity: overlayOpacity,
-                                                visible: s.role === 'pred' ? predictionVisible : overlayVisible,
-                                            }
-                                        })}
-                                        zoom={zoom}
-                                        pan={pan}
-                                        windowLevel={windowLevel}
-                                        windowWidth={windowWidth}
-                                        width={canvasSize.width}
+                                                visible: s.visible !== false,
+                                            }))}
+                                            zoom={zoom}
+                                            pan={pan}
+                                            windowLevel={windowLevel}
+                                            windowWidth={windowWidth}
+                                            width={canvasSize.width}
                                             height={canvasSize.height}
-                                            onSliceDimensions={setSliceImageDims}
                                         />
                                         {clickedXyz && clickedVoxel && (
                                             <div className="absolute top-2 right-2 text-xs font-mono bg-black/70 text-white px-2 py-1 rounded pointer-events-none space-y-0.5">
@@ -558,10 +749,36 @@ export function DatasetViewerPanel() {
                         </div>
                         <p className="text-xs text-muted-foreground">Click on image to set level and width from that area.</p>
                         <div className="space-y-2">
-                            <Label className="text-xs">Window Level: {windowLevel}</Label>
+                            <Select
+                                value={presetId ?? ''}
+                                onValueChange={(val) => {
+                                    const preset = WINDOW_PRESETS.find((p) => p.id === val)
+                                    if (!preset) return
+                                    setPresetId(preset.id)
+                                    setLocalWindowLevel(preset.wl)
+                                    setLocalWindowWidth(preset.ww)
+                                    setWindowLevel(preset.wl)
+                                    setWindowWidth(preset.ww)
+                                }}
+                            >
+                                <SelectTrigger>
+                                    <SelectValue placeholder="Window preset" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {WINDOW_PRESETS.map((p) => (
+                                        <SelectItem key={p.id} value={p.id}>
+                                            {p.label}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </div>
+                        <div className="space-y-2">
+                            <Label className="text-xs">Window Level: {localWindowLevel}</Label>
                             <Slider
-                                value={[windowLevel]}
+                                value={[localWindowLevel]}
                                 onValueChange={handleWindowLevelChange}
+                                onValueCommit={handleWindowLevelCommit}
                                 min={-1000}
                                 max={1000}
                                 step={1}
@@ -569,10 +786,11 @@ export function DatasetViewerPanel() {
                             />
                         </div>
                         <div className="space-y-2">
-                            <Label className="text-xs">Window Width: {windowWidth}</Label>
+                            <Label className="text-xs">Window Width: {localWindowWidth}</Label>
                             <Slider
-                                value={[windowWidth]}
+                                value={[localWindowWidth]}
                                 onValueChange={handleWindowWidthChange}
+                                onValueCommit={handleWindowWidthCommit}
                                 min={1}
                                 max={2000}
                                 step={1}
@@ -589,35 +807,61 @@ export function DatasetViewerPanel() {
                             </Button>
                         </div>
                         <div className="space-y-3 border-t pt-3">
+                            {segList.map((s, i) => (
+                                <div key={`${s.volumeId}-${i}`} className="flex items-center gap-2 min-w-0">
+                                    <span
+                                        className="h-3 w-3 rounded border border-border shrink-0"
+                                        style={{ backgroundColor: getSegColor(s, i) }}
+                                        aria-hidden
+                                    />
+                                    <Label className="text-xs min-w-0 flex-1 truncate">
+                                        {s.name || (s.role === 'pred' ? 'Prediction' : s.role === 'gt' ? 'Label' : `Mask ${i + 1}`)}
+                                    </Label>
+                                    {s.role && (
+                                        <Badge
+                                            variant={s.role === 'pred' ? 'secondary' : 'default'}
+                                            className="h-5 rounded-sm px-1.5 text-[10px] shrink-0"
+                                        >
+                                            {s.role === 'pred' ? 'Pred' : 'GT'}
+                                        </Badge>
+                                    )}
+                                    <Switch
+                                        checked={s.visible !== false}
+                                        onCheckedChange={(v) => updateSegVisible(i, v)}
+                                    />
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                            <Button variant="outline" size="sm">
+                                                {(s.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
+                                            </Button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent>
+                                            <DropdownMenuItem onClick={() => updateSegMode(i, 'filled')}>Filled</DropdownMenuItem>
+                                            <DropdownMenuItem onClick={() => updateSegMode(i, 'boundary')}>Boundary</DropdownMenuItem>
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                    <Popover>
+                                        <PopoverTrigger asChild>
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-8 w-8 shrink-0"
+                                            >
+                                                <Palette className="h-4 w-4" />
+                                            </Button>
+                                        </PopoverTrigger>
+                                        <PopoverContent className="w-48">
+                                            <input
+                                                type="color"
+                                                value={getSegColor(s, i)}
+                                                onChange={(e) => updateSegColor(i, e.target.value)}
+                                                className="w-full h-8 cursor-pointer rounded"
+                                            />
+                                        </PopoverContent>
+                                    </Popover>
+                                </div>
+                            ))}
                             {segList.length > 0 && (
-                                <div className="flex flex-wrap items-center gap-3 text-xs">
-                                    {segList.map((s, i) => {
-                                        const color =
-                                            s.role === 'pred'
-                                                ? DEFAULT_PRED_COLOR
-                                                : generateDistinctColor(i, segList.length)
-                                        return (
-                                            <span key={`${s.volumeId}-${i}`} className="flex items-center gap-1.5">
-                                                <span className="h-2.5 w-2.5 rounded-sm shrink-0 border border-border" style={{ backgroundColor: color }} aria-hidden />
-                                                {s.name || (s.role === 'pred' ? 'Prediction' : 'Label')}
-                                            </span>
-                                        )
-                                    })}
-                                </div>
-                            )}
-                            {hasLabel && (
-                                <div className="flex items-center justify-between">
-                                    <Label className="text-xs">Show Labels</Label>
-                                    <Switch checked={overlayVisible} onCheckedChange={setOverlayVisible} />
-                                </div>
-                            )}
-                            {hasPred && (
-                                <div className="flex items-center justify-between">
-                                    <Label className="text-xs">Show Predictions</Label>
-                                    <Switch checked={predictionVisible} onCheckedChange={setPredictionVisible} />
-                                </div>
-                            )}
-                            {(hasLabel || hasPred) && (
                                 <div className="space-y-2">
                                     <Label className="text-xs">Overlay opacity: {(overlayOpacity * 100).toFixed(0)}%</Label>
                                     <Slider
@@ -666,7 +910,7 @@ export function DatasetNav() {
                 const res = await openDatasetCase(datasetCase.datasetId, {
                     case_index: nextIndex,
                 })
-                const segVolumes =
+                const segVolumesRaw =
                     res.seg_volume_ids?.map((s) => ({
                         volumeId: s.volume_id,
                         role: s.role,
@@ -681,6 +925,7 @@ export function DatasetNav() {
                             ? [{ volumeId: res.pred_volume_id, role: 'pred' as const, name: 'Prediction', allBackground: null }]
                             : []),
                     ]
+                const segVolumes = mergeSegDisplay(datasetCase.segVolumes, segVolumesRaw)
                 setDatasetCase({
                     datasetId: datasetCase.datasetId,
                     caseIndex: res.case_index,

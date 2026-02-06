@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, DragEvent, ChangeEvent } from 'react'
+import { useState, useRef, useEffect, DragEvent, ChangeEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { uploadVolume, createPair, addSegmentToPair, fetchFirstSliceWithMask } from '@/lib/api-client'
 import { VolumeMetadata, CreatePairResponse } from '@/lib/api-types'
@@ -17,7 +17,10 @@ import { Button } from './ui/button'
 import { Label } from './ui/label'
 import { Progress } from './ui/progress'
 import { Alert, AlertDescription, AlertTitle } from './ui/alert'
-import { Upload, FileUp, CheckCircle2, XCircle, AlertCircle, Plus, Trash2 } from 'lucide-react'
+import { Badge } from './ui/badge'
+import { Card, CardContent, CardHeader } from './ui/card'
+import { Input } from './ui/input'
+import { Upload, FileUp, CheckCircle2, XCircle, AlertCircle, Plus, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { toast } from 'sonner'
 
 interface FileUploadDialogProps {
@@ -47,6 +50,29 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
 
     const ctInputRef = useRef<HTMLInputElement>(null)
     const segInputRefs = useRef<(HTMLInputElement | null)[]>([])
+    const dialogContentRef = useRef<HTMLDivElement>(null)
+    const pendingPickRef = useRef<number | null>(null)
+
+    const scrollBottom = () => {
+        const el = dialogContentRef.current
+        if (!el) return
+        el.scrollTop = el.scrollHeight - el.clientHeight
+    }
+
+    useEffect(() => {
+        scrollBottom()
+        const t = requestAnimationFrame(scrollBottom)
+        return () => cancelAnimationFrame(t)
+    }, [segs.length, expandedSeg, stage])
+
+    useEffect(() => {
+        const idx = pendingPickRef.current
+        if (idx === null) return
+        const el = segInputRefs.current[idx]
+        if (!el) return
+        pendingPickRef.current = null
+        requestAnimationFrame(() => el.click())
+    }, [expandedSeg, segs.length])
 
     const addPair = useViewerStore((state) => state.addPair)
     const addSegToPairStore = useViewerStore((state) => state.addSegToPair)
@@ -134,24 +160,28 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
         if (file) {
             setCtFile(file)
             setErrorMessage(null)
+            requestAnimationFrame(scrollBottom)
         }
     }
 
     const addSegEntry = () => {
+        const newIndex = segs.length
+        pendingPickRef.current = newIndex
         setSegs((prev) => {
             if (prev.length >= 10) return prev
-            const next = [
+            return [
                 ...prev,
                 { file: null, name: `Segmentation ${prev.length + 1}`, color: '#0072B2', role: null },
             ]
-            return next
         })
-        setExpandedSeg((prev) => (prev === null ? 0 : segs.length))
+        setExpandedSeg(newIndex)
+        requestAnimationFrame(scrollBottom)
     }
 
     const updateSeg = (index: number, patch: Partial<SegEntry>) => {
         setSegs((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)))
         setErrorMessage(null)
+        if (patch.file) requestAnimationFrame(scrollBottom)
     }
 
     const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
@@ -180,6 +210,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
         if (file) {
             setCtFile(file)
             setErrorMessage(null)
+            requestAnimationFrame(scrollBottom)
         }
     }
 
@@ -201,6 +232,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
             return
         }
 
+        scrollBottom()
         setStage('uploading-ct')
         setUploadProgress(0)
         setErrorMessage(null)
@@ -288,7 +320,10 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                     </Button>
                 )}
             </DialogTrigger>
-            <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-y-auto">
+            <DialogContent
+                ref={dialogContentRef}
+                className="sm:max-w-[600px] max-h-[85vh] overflow-y-auto overflow-x-hidden min-w-0"
+            >
                 <DialogHeader>
                     <DialogTitle>Upload CT and Segmentation Pair</DialogTitle>
                     <DialogDescription>
@@ -297,12 +332,12 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                     </DialogDescription>
                 </DialogHeader>
 
-                <div className="space-y-6 py-4">
+                <div className="space-y-6 py-4 min-w-0 overflow-hidden">
                     {/* CT File Upload */}
-                    <div className="space-y-2">
+                    <div className="space-y-2 min-w-0 overflow-hidden">
                         <Label htmlFor="ct-file">CT Volume</Label>
                         <div
-                            className={`border-2 border-dashed rounded-lg p-6 transition-colors w-full min-w-0 ${isDraggingCt
+                            className={`border-2 border-dashed rounded-lg p-6 transition-colors w-full min-w-0 overflow-hidden ${isDraggingCt
                                 ? 'border-primary bg-primary/5'
                                 : 'border-muted-foreground/25 hover:border-muted-foreground/50'
                                 }`}
@@ -313,10 +348,10 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                         >
                             <div className="flex flex-col items-center gap-2 text-center w-full min-w-0 overflow-hidden">
                                 <FileUp className="h-8 w-8 text-muted-foreground shrink-0" />
-                                <div className="text-sm w-full min-w-0">
+                                <div className="text-sm w-full min-w-0 overflow-hidden">
                                     {ctFile ? (
-                                        <p className="w-full max-w-full font-medium text-foreground break-all">
-                                            {ctFile.name}
+                                        <p className="w-full max-w-full min-w-0 truncate-start font-medium text-foreground px-1 block" title={ctFile.name}>
+                                            <span className="[direction:ltr]">{ctFile.name}</span>
                                         </p>
                                     ) : (
                                         <>
@@ -349,131 +384,167 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                         </div>
                     </div>
 
-                    {/* Segmentation File Uploads */}
-                    <div className="space-y-3">
-                        {segs.map((seg, idx) => (
-                            <div key={idx} className="rounded-lg border border-border p-3 space-y-2">
-                                <div className="flex items-center justify-between gap-2">
-                                    <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="sm"
-                                        className="text-xs"
-                                        onClick={() => setExpandedSeg(idx)}
+                    {/* Segmentation masks */}
+                    <div className="space-y-2 min-w-0 overflow-hidden">
+                        <Label className="text-sm font-medium">Segmentation masks</Label>
+                        <p className="text-xs text-muted-foreground">
+                            Add up to 10 masks. Choose file, optional name and color, and role (GT or Pred).
+                        </p>
+                        <div className="space-y-2 min-w-0">
+                            {segs.map((seg, idx) => (
+                                <Card key={idx} className="w-full min-w-0 overflow-hidden border-sidebar bg-sidebar text-sidebar-foreground">
+                                    <CardHeader
+                                        className="flex flex-row items-center justify-between gap-2 space-y-0 p-3 cursor-pointer hover:bg-sidebar-accent transition-colors min-w-0 overflow-hidden"
+                                        onClick={() => setExpandedSeg(expandedSeg === idx ? null : idx)}
                                     >
-                                        Segmentation {idx + 1}
-                                    </Button>
-                                    <div className="flex items-center gap-2">
-                                        {seg.role && (
-                                            <Badge className="h-5 rounded-sm px-1.5 text-[10px]">
-                                                {seg.role === 'pred' ? 'Pred' : 'GT'}
-                                            </Badge>
-                                        )}
-                                        <Button
-                                            type="button"
-                                            variant="ghost"
-                                            size="icon"
-                                            onClick={() =>
-                                                setSegs((prev) => {
-                                                    const next = prev.filter((_, i) => i !== idx)
-                                                    setExpandedSeg((e) =>
-                                                        e === null ? null : Math.min(e, next.length - 1)
-                                                    )
-                                                    return next
-                                                })
-                                            }
-                                            disabled={isUploading}
-                                        >
-                                            <Trash2 className="h-4 w-4" />
-                                        </Button>
-                                    </div>
-                                </div>
-                                {expandedSeg === idx && (
-                                    <>
-                                        <div className="flex items-center gap-2 min-w-0 w-full max-w-full overflow-hidden">
-                                            <input
-                                                ref={(el) => {
-                                                    segInputRefs.current[idx] = el
-                                                }}
-                                                type="file"
-                                                accept=".nii,.gz,.mha,.mhd"
-                                                onChange={(e) => updateSeg(idx, { file: e.target.files?.[0] ?? null })}
-                                                className="hidden"
-                                                disabled={isUploading}
-                                            />
+                                        <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+                                            <span className="text-sm font-medium shrink-0 whitespace-nowrap min-w-[7rem]">
+                                                Segmentation {idx + 1}
+                                            </span>
+                                            {seg.role && (
+                                                <Badge variant="secondary" className="text-[10px] px-1.5 py-0 shrink-0">
+                                                    {seg.role === 'pred' ? 'Pred' : 'GT'}
+                                                </Badge>
+                                            )}
+                                            {seg.file && (
+                                                <span className="text-xs text-muted-foreground truncate-start min-w-0 block" title={seg.file.name}>
+                                                    <span className="[direction:ltr]">{seg.file.name}</span>
+                                                </span>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center gap-1 shrink-0">
                                             <Button
                                                 type="button"
-                                                variant="outline"
-                                                size="sm"
-                                                onClick={() => segInputRefs.current[idx]?.click()}
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-8 w-8"
+                                                onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    setSegs((prev) => {
+                                                        const next = prev.filter((_, i) => i !== idx)
+                                                        setExpandedSeg((e) =>
+                                                            e === null ? null : Math.min(e, next.length - 1)
+                                                        )
+                                                        return next
+                                                    })
+                                                }}
                                                 disabled={isUploading}
-                                                className="shrink-0"
                                             >
-                                                Choose file
+                                                <Trash2 className="h-4 w-4" />
                                             </Button>
-                                            <span className="text-xs text-muted-foreground break-all min-w-0 flex-1 max-w-full">
-                                                {seg.file ? seg.file.name : 'No file selected'}
-                                            </span>
+                                            {expandedSeg === idx ? (
+                                                <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                                            ) : (
+                                                <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                                            )}
                                         </div>
-                                        <div className="flex items-center gap-2 min-w-0">
-                                            <Label className="text-xs w-10">Name</Label>
-                                            <input
-                                                type="text"
-                                                value={seg.name}
-                                                onChange={(e) => updateSeg(idx, { name: e.target.value })}
-                                                className="flex-1 min-w-0 rounded-md border border-input bg-background px-2 py-1 text-xs"
-                                                disabled={isUploading}
-                                            />
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <Label className="text-xs w-10">Color</Label>
-                                            <input
-                                                type="color"
-                                                value={seg.color}
-                                                onChange={(e) => updateSeg(idx, { color: e.target.value })}
-                                                className="h-8 w-12 cursor-pointer rounded"
-                                                disabled={isUploading}
-                                            />
-                                            <div className="flex items-center gap-1">
-                                                <Button
-                                                    type="button"
-                                                    size="sm"
-                                                    variant={seg.role === 'gt' ? 'default' : 'outline'}
-                                                    onClick={() =>
-                                                        updateSeg(idx, { role: seg.role === 'gt' ? null : 'gt' })
-                                                    }
-                                                    disabled={isUploading}
-                                                >
-                                                    GT
-                                                </Button>
-                                                <Button
-                                                    type="button"
-                                                    size="sm"
-                                                    variant={seg.role === 'pred' ? 'default' : 'outline'}
-                                                    onClick={() =>
-                                                        updateSeg(idx, { role: seg.role === 'pred' ? null : 'pred' })
-                                                    }
-                                                    disabled={isUploading}
-                                                >
-                                                    Pred
-                                                </Button>
+                                    </CardHeader>
+                                    {expandedSeg === idx && (
+                                        <CardContent className="p-3 pt-0 space-y-3 min-w-0 overflow-hidden">
+                                            <div className="flex flex-col gap-2 min-w-0 overflow-hidden">
+                                                <Label htmlFor={`seg-file-${idx}`} className="text-xs">
+                                                    File
+                                                </Label>
+                                                <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+                                                    <input
+                                                        ref={(el) => {
+                                                            segInputRefs.current[idx] = el
+                                                        }}
+                                                        id={`seg-file-${idx}`}
+                                                        type="file"
+                                                        accept=".nii,.gz,.mha,.mhd"
+                                                        onChange={(e) =>
+                                                            updateSeg(idx, { file: e.target.files?.[0] ?? null })
+                                                        }
+                                                        className="hidden"
+                                                        disabled={isUploading}
+                                                    />
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        size="sm"
+                                                        onClick={() => segInputRefs.current[idx]?.click()}
+                                                        disabled={isUploading}
+                                                        className="shrink-0"
+                                                    >
+                                                        Choose file
+                                                    </Button>
+                                                    <div className="min-w-0 flex-1 overflow-hidden">
+                                                        <span className="text-xs text-muted-foreground truncate-start block" title={seg.file ? seg.file.name : undefined}>
+                                                            <span className="[direction:ltr]">{seg.file ? seg.file.name : 'No file selected'}</span>
+                                                        </span>
+                                                    </div>
+                                                </div>
                                             </div>
-                                        </div>
-                                    </>
-                                )}
-                            </div>
-                        ))}
+                                            <div className="flex flex-col gap-2">
+                                                <Label htmlFor={`seg-name-${idx}`} className="text-xs">
+                                                    Name
+                                                </Label>
+                                                <Input
+                                                    id={`seg-name-${idx}`}
+                                                    value={seg.name}
+                                                    onChange={(e) => updateSeg(idx, { name: e.target.value })}
+                                                    className="h-8 text-sm"
+                                                    placeholder="Optional label"
+                                                    disabled={isUploading}
+                                                />
+                                            </div>
+                                            <div className="flex flex-col gap-2">
+                                                <Label className="text-xs">Color & role</Label>
+                                                <div className="flex items-center gap-3">
+                                                    <input
+                                                        type="color"
+                                                        value={seg.color}
+                                                        onChange={(e) => updateSeg(idx, { color: e.target.value })}
+                                                        className="h-8 w-10 cursor-pointer rounded border border-input"
+                                                        disabled={isUploading}
+                                                    />
+                                                    <div className="flex items-center gap-1">
+                                                        <Button
+                                                            type="button"
+                                                            variant={seg.role === 'gt' ? 'default' : 'outline'}
+                                                            className="h-8 py-0 px-2 text-xs"
+                                                            onClick={() =>
+                                                                updateSeg(idx, { role: seg.role === 'gt' ? null : 'gt' })
+                                                            }
+                                                            disabled={isUploading}
+                                                        >
+                                                            Ground truth
+                                                        </Button>
+                                                        <Button
+                                                            type="button"
+                                                            variant={seg.role === 'pred' ? 'default' : 'outline'}
+                                                            className="h-8 py-0 px-2 text-xs"
+                                                            onClick={() =>
+                                                                updateSeg(idx, {
+                                                                    role: seg.role === 'pred' ? null : 'pred',
+                                                                })
+                                                            }
+                                                            disabled={isUploading}
+                                                        >
+                                                            Prediction
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </CardContent>
+                                    )}
+                                </Card>
+                            ))}
+                        </div>
                         {segs.length < 10 && (
                             <Button
                                 type="button"
                                 variant="outline"
                                 size="sm"
-                                className="gap-2"
+                                className="gap-2 w-full"
                                 onClick={addSegEntry}
                                 disabled={isUploading}
                             >
                                 <Plus className="h-4 w-4" />
-                                {segs.length === 0 ? 'Add Segmentation' : `Add ${ordinal(segs.length + 1)} segmentation`}
+                                {segs.length === 0
+                                    ? 'Add segmentation mask'
+                                    : `Add ${ordinal(segs.length + 1)} segmentation`}
                             </Button>
                         )}
                     </div>

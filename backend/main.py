@@ -928,12 +928,16 @@ async def get_segmentation_slice(
 async def get_first_slice_with_mask(
     volume_id: str,
     orientation: str = Query("axial", description="Slice orientation: axial, sagittal, or coronal"),
+    middle: bool = Query(False, description="If true, return the middle slice of the mask extent instead of the first"),
 ):
-    """Return the first slice index along the given orientation that contains any segmentation foreground."""
+    """Return the first (or middle) slice index along the given orientation that contains segmentation foreground."""
     try:
         _check_orientation(orientation)
         volume = volume_loader.get_volume(volume_id)
-        slice_index = slice_extractor.first_slice_with_foreground(volume, orientation)
+        if middle:
+            slice_index = slice_extractor.middle_slice_with_foreground(volume, orientation)
+        else:
+            slice_index = slice_extractor.first_slice_with_foreground(volume, orientation)
         return {"slice_index": slice_index}
     except VolumeLoadError as e:
         raise HTTPException(status_code=404, detail=str(e))

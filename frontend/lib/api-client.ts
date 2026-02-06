@@ -276,9 +276,11 @@ export async function submitDatasetDecision(
 
 export async function fetchFirstSliceWithMask(
     volumeId: string,
-    orientation: 'axial' | 'sagittal' | 'coronal' = 'axial'
+    orientation: 'axial' | 'sagittal' | 'coronal' = 'axial',
+    middle = false
 ): Promise<FirstSliceWithMaskResponse> {
     const searchParams = new URLSearchParams({ orientation })
+    if (middle) searchParams.set('middle', 'true')
     const response = await fetch(
         `${API_BASE_URL}/api/slices/segmentation/${volumeId}/first-slice-index?${searchParams}`
     )

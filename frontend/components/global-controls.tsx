@@ -1,19 +1,21 @@
 'use client'
 
 import { useViewerStore, getPairSegVolumes } from '@/lib/store'
-import { usePairMetadata } from '@/lib/api-hooks'
+import { usePairMetadata, useVolumeMetadatas } from '@/lib/api-hooks'
 import { Button } from './ui/button'
 import { Slider } from './ui/slider'
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { RotateCcw, Link, Unlink, Upload, FolderOpen, Info } from 'lucide-react'
-import { AXIS_MAP, convertIndexToPhysical } from '@/lib/synchronization'
+import { AXIS_MAP } from '@/lib/synchronization'
 import { fetchFirstSliceWithMask } from '@/lib/api-client'
 import type { ViewOrientation } from '@/lib/store'
 import { FileUploadDialog } from './file-upload-dialog'
 import { DatasetLoadDialog } from './dataset-load-dialog'
 import { useState, useRef, useEffect } from 'react'
 import { toast } from 'sonner'
+import type { VolumeMetadata } from '@/lib/api-types'
 import {
     Dialog,
     DialogContent,
@@ -26,26 +28,35 @@ import {
 const SLIDER_DEBOUNCE_MS = 32
 
 type PhysicalRange = { min: number; max: number }
+function physicalRangeFromMetadata(meta: VolumeMetadata, orientation: ViewOrientation): PhysicalRange {
+    const axis = AXIS_MAP[orientation]
+    const a = meta.origin[axis]
+    const b = meta.origin[axis] + meta.spacing[axis] * (meta.dimensions[axis] - 1)
+    return { min: Math.min(a, b), max: Math.max(a, b) }
+}
 
-async function getPhysicalRange(
-    pairId: string,
-    maxSliceIndex: number,
-    orientation: ViewOrientation = 'axial'
-): Promise<PhysicalRange> {
-    const [min, max] = await Promise.all([
-        convertIndexToPhysical(pairId, 0, orientation),
-        convertIndexToPhysical(pairId, maxSliceIndex, orientation),
-    ])
-    return { min, max }
+function physicalAtIndex(meta: VolumeMetadata, sliceIndex: number, orientation: ViewOrientation): number {
+    const axis = AXIS_MAP[orientation]
+    return meta.origin[axis] + meta.spacing[axis] * sliceIndex
+}
+
+function clamp(x: number, lo: number, hi: number): number {
+    return Math.max(lo, Math.min(x, hi))
 }
 
 export function GlobalControls() {
     const pairs = useViewerStore((state) => state.pairs)
     const synchronized = useViewerStore((state) => state.synchronized)
+    const syncMode = useViewerStore((state) => state.syncMode)
+    const syncRefPairId = useViewerStore((state) => state.syncRefPairId)
     const snapToMask = useViewerStore((state) => state.snapToMask)
     const setSynchronized = useViewerStore((state) => state.setSynchronized)
     const setSnapToMask = useViewerStore((state) => state.setSnapToMask)
     const setGlobalSlicePhysical = useViewerStore((state) => state.setGlobalSlicePhysical)
+    const setGlobalSliceNormalized = useViewerStore((state) => state.setGlobalSliceNormalized)
+    const globalSliceNormalized = useViewerStore((state) => state.globalSliceNormalized)
+    const setSyncMode = useViewerStore((state) => state.setSyncMode)
+    const setSyncRefPairId = useViewerStore((state) => state.setSyncRefPairId)
     const updatePairSlice = useViewerStore((state) => state.updatePairSlice)
     const updatePairOrientation = useViewerStore((state) => state.updatePairOrientation)
     const resetPairView = useViewerStore((state) => state.resetPairView)
@@ -57,59 +68,146 @@ export function GlobalControls() {
     const viewMode = useViewerStore((state) => state.viewMode)
     const setViewMode = useViewerStore((state) => state.setViewMode)
     const setDatasetCase = useViewerStore((state) => state.setDatasetCase)
+    const pairControlsExpanded = useViewerStore((state) => state.pairControlsExpanded)
+    const setAllPairsControlsExpanded = useViewerStore((state) => state.setAllPairsControlsExpanded)
+    const globalSlicePhysical = useViewerStore((state) => state.globalSlicePhysical)
 
     const [sliderValue, setSliderValue] = useState(0)
     const [syncDirectionDialogOpen, setSyncDirectionDialogOpen] = useState(false)
     const [uploadInfoOpen, setUploadInfoOpen] = useState(false)
     const [datasetInfoOpen, setDatasetInfoOpen] = useState(false)
     const [cleanInfoOpen, setCleanInfoOpen] = useState(false)
+    const [syncInfoOpen, setSyncInfoOpen] = useState(false)
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-    const rangeCacheRef = useRef<{ pairId: string; maxIdx: number; ori: ViewOrientation; range: PhysicalRange } | null>(null)
+    const rangeCacheRef = useRef<{ key: string; range: PhysicalRange } | null>(null)
 
     const pairArray = Array.from(pairs.values())
     const hasPairs = pairArray.length > 0
     const firstPair = pairArray[0] ?? null
     const orientation = firstPair?.orientation ?? 'axial'
     const { data: firstPairMetadata } = usePairMetadata(firstPair?.pairId ?? null)
-    const maxSliceIndex =
-        firstPairMetadata?.ct_metadata.dimensions[AXIS_MAP[orientation]] != null
-            ? firstPairMetadata.ct_metadata.dimensions[AXIS_MAP[orientation]] - 1
-            : 99
+    const ctVolumeIds = pairArray.map((p) => p.ctVolumeId)
+    const ctMetaQueries = useVolumeMetadatas(ctVolumeIds)
+    const ctMetas = ctMetaQueries.map((q) => q.data ?? null)
 
     const allSameOrientation = hasPairs && new Set(pairArray.map((p) => p.orientation ?? 'axial')).size === 1
 
     useEffect(() => {
         rangeCacheRef.current = null
-    }, [firstPair?.pairId, maxSliceIndex, orientation])
+    }, [orientation, hasPairs, pairArray.length, syncMode, syncRefPairId])
 
     useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current) }, [])
 
-    const applyPhysicalFromSliderValue = async (percent: number) => {
-        if (!firstPair) return
-        const key = { pairId: firstPair.pairId, maxIdx: maxSliceIndex, ori: orientation }
-        const cached = rangeCacheRef.current
-        const hit = cached?.pairId === key.pairId && cached?.maxIdx === key.maxIdx && cached?.ori === key.ori
-        let range = hit ? cached!.range : null
-        if (!range) {
-            try {
-                range = await getPhysicalRange(firstPair.pairId, maxSliceIndex, orientation)
-                rangeCacheRef.current = { pairId: firstPair.pairId, maxIdx: maxSliceIndex, ori: orientation, range }
-            } catch (e) {
-                console.error('Failed to update global slice:', e)
-                toast.error('Slice update failed', { description: 'Could not update global slice position' })
-                return
-            }
+    const ranges = (() => {
+        if (!hasPairs) return null
+        const out: { pairId: string; meta: VolumeMetadata; range: PhysicalRange }[] = []
+        for (let i = 0; i < pairArray.length; i++) {
+            const meta = ctMetas[i]
+            if (!meta) return null
+            out.push({ pairId: pairArray[i].pairId, meta, range: physicalRangeFromMetadata(meta, orientation) })
         }
-        setGlobalSlicePhysical(range.min + (percent / 100) * (range.max - range.min))
+        return out
+    })()
+
+    const overlapRange = (() => {
+        if (!ranges || ranges.length === 0) return null
+        let min = -Infinity
+        let max = Infinity
+        for (const r of ranges) {
+            if (r.range.min > min) min = r.range.min
+            if (r.range.max < max) max = r.range.max
+        }
+        if (!(max > min)) return null
+        return { min, max }
+    })()
+
+    const unionRange = (() => {
+        if (!ranges || ranges.length === 0) return null
+        let min = Infinity
+        let max = -Infinity
+        for (const r of ranges) {
+            if (r.range.min < min) min = r.range.min
+            if (r.range.max > max) max = r.range.max
+        }
+        if (!(max > min)) return null
+        return { min, max }
+    })()
+
+    const refRange = (() => {
+        if (!ranges || ranges.length === 0) return null
+        const refId = syncRefPairId ?? ranges[0].pairId
+        const hit = ranges.find((r) => r.pairId === refId) ?? ranges[0]
+        return hit.range
+    })()
+
+    const currentRange = (() => {
+        if (syncMode === 'overlap') return overlapRange
+        if (syncMode === 'reference') return refRange
+        return null
+    })()
+    const rangeMin = currentRange?.min ?? null
+    const rangeMax = currentRange?.max ?? null
+
+    const rangeKey = `${syncMode}:${syncRefPairId ?? ''}:${orientation}:${pairArray.map((p) => p.pairId).sort().join('|')}`
+
+    const outOfRangeCount = (() => {
+        if (!synchronized || globalSlicePhysical === null || !ranges) return 0
+        if (syncMode !== 'reference') return 0
+        let n = 0
+        for (const r of ranges) {
+            if (globalSlicePhysical < r.range.min || globalSlicePhysical > r.range.max) n += 1
+        }
+        return n
+    })()
+
+    useEffect(() => {
+        if (!synchronized || syncMode !== 'overlap' && syncMode !== 'reference') return
+        if (rangeMin === null || rangeMax === null || globalSlicePhysical === null) return
+        const range = { min: rangeMin, max: rangeMax }
+        rangeCacheRef.current = { key: rangeKey, range }
+        const r = range.max - range.min
+        const phys = clamp(globalSlicePhysical, range.min, range.max)
+        if (phys !== globalSlicePhysical) setGlobalSlicePhysical(phys)
+        setSliderValue(r !== 0 ? Math.round(((phys - range.min) / r) * 100) : 0)
+    }, [synchronized, syncMode, rangeMin, rangeMax, rangeKey, globalSlicePhysical, setGlobalSlicePhysical])
+
+    useEffect(() => {
+        if (!synchronized || syncMode !== 'union' || globalSliceNormalized === null) return
+        setSliderValue(Math.round(globalSliceNormalized * 100))
+    }, [synchronized, syncMode, globalSliceNormalized])
+
+    const applyPhysicalFromSliderValue = (percent: number) => {
+        if (rangeMin === null || rangeMax === null) return
+        const phys = rangeMin + (percent / 100) * (rangeMax - rangeMin)
+        setGlobalSlicePhysical(phys)
     }
 
-    const runSyncOnInit = async (fp: (typeof pairArray)[0], ori: ViewOrientation, maxIdx: number) => {
+    const runSyncOnInit = (fp: (typeof pairArray)[0], ori: ViewOrientation) => {
         try {
-            const [physicalPosition, range] = await Promise.all([
-                convertIndexToPhysical(fp.pairId, fp.currentSliceIndex, ori),
-                getPhysicalRange(fp.pairId, maxIdx, ori),
-            ])
-            rangeCacheRef.current = { pairId: fp.pairId, maxIdx, ori, range }
+            const meta =
+                ctMetas[pairArray.findIndex((p) => p.pairId === fp.pairId)] ??
+                firstPairMetadata?.ct_metadata ??
+                null
+            if (!meta) {
+                toast.error('Synchronization failed', { description: 'Volume metadata not available yet' })
+                return
+            }
+            if (syncMode === 'union') {
+                const axis = AXIS_MAP[ori]
+                const maxIdx = meta.dimensions[axis] - 1
+                const frac = maxIdx > 0 ? fp.currentSliceIndex / maxIdx : 0
+                setGlobalSlicePhysical(null)
+                setGlobalSliceNormalized(frac)
+                setSliderValue(Math.round(frac * 100))
+                return
+            }
+            const range = currentRange
+            if (!range) {
+                toast.error('Synchronization failed', { description: 'Could not compute a shared slice range' })
+                return
+            }
+            rangeCacheRef.current = { key: rangeKey, range }
+            const physicalPosition = clamp(physicalAtIndex(meta, fp.currentSliceIndex, ori), range.min, range.max)
             setGlobalSlicePhysical(physicalPosition)
             const r = range.max - range.min
             setSliderValue(r !== 0 ? Math.round(((physicalPosition - range.min) / r) * 100) : 0)
@@ -124,6 +222,7 @@ export function GlobalControls() {
         if (!checked) {
             setSynchronized(false)
             setGlobalSlicePhysical(null)
+            setGlobalSliceNormalized(null)
             toast.info('Synchronization disabled', { description: 'Panels can now be controlled independently' })
             return
         }
@@ -132,28 +231,69 @@ export function GlobalControls() {
             setSyncDirectionDialogOpen(true)
             return
         }
+        if (syncMode === 'union') {
+            const axis = AXIS_MAP[orientation]
+            const counts = ctMetas.map((m) => m?.dimensions?.[axis]).filter((n): n is number => typeof n === 'number')
+            if (counts.length === pairArray.length && new Set(counts).size > 1) {
+                toast.info('Different slice counts', { description: 'Panels will scrub at different speeds.' })
+            }
+        } else if (syncMode === 'overlap') {
+            if (!overlapRange && unionRange) {
+                setSyncMode('reference')
+                setSyncRefPairId(firstPair?.pairId ?? null)
+                toast.info('No shared overlap', { description: 'Volumes do not overlap in physical space. Using reference range instead.' })
+            } else if (overlapRange && unionRange) {
+                const ov = overlapRange.max - overlapRange.min
+                const un = unionRange.max - unionRange.min
+                if (un > 0 && ov < un - 1e-6) {
+                    toast.info('Using shared overlap', { description: 'Volumes have different origins. Global slider is limited to the region all panels share.' })
+                }
+            }
+        } else {
+            toast.info('Sync range may clamp', { description: 'Some panels may hit their start/end when volumes have different origins.' })
+        }
         setSynchronized(true)
-        await runSyncOnInit(firstPair!, orientation, maxSliceIndex)
+        const ref =
+            syncMode === 'reference'
+                ? (pairArray.find((p) => p.pairId === (syncRefPairId ?? pairArray[0]?.pairId)) ?? firstPair!)
+                : firstPair!
+        runSyncOnInit(ref, orientation)
     }
 
     const handleSetAllAxialAndSync = async () => {
         setSyncDirectionDialogOpen(false)
         pairArray.forEach((p) => updatePairOrientation(p.pairId, 'axial'))
         setSynchronized(true)
+        if (syncMode === 'overlap') {
+            if (!overlapRange && unionRange) {
+                setSyncMode('union')
+                toast.info('No shared overlap', { description: 'Volumes do not overlap in physical space. Using union range instead.' })
+            } else if (overlapRange && unionRange) {
+                const ov = overlapRange.max - overlapRange.min
+                const un = unionRange.max - unionRange.min
+                if (un > 0 && ov < un - 1e-6) {
+                    toast.info('Using shared overlap', { description: 'Volumes have different origins. Global slider is limited to the region all panels share.' })
+                }
+            }
+        } else {
+            toast.info('Sync range may clamp', { description: 'Some panels may hit their start/end when volumes have different origins.' })
+        }
         const fp = firstPair!
         const ori = 'axial' as ViewOrientation
-        const size = firstPairMetadata?.ct_metadata?.dimensions?.[AXIS_MAP.axial] ?? 100
-        const maxIdx = size - 1
-        await runSyncOnInit(fp, ori, maxIdx)
+        runSyncOnInit(fp, ori)
     }
 
     const handleSliderChange = (value: number[]) => {
         const v = value[0]
         setSliderValue(v)
         if (!synchronized || !firstPair) return
+        if (syncMode === 'union') {
+            setGlobalSliceNormalized(v / 100)
+            return
+        }
         const cached = rangeCacheRef.current
-        const hit = cached?.pairId === firstPair.pairId && cached?.maxIdx === maxSliceIndex && cached?.ori === orientation
-        const range = hit ? cached!.range : null
+        const hit = cached?.key === rangeKey
+        const range = hit ? cached!.range : currentRange
         if (range) {
             setGlobalSlicePhysical(range.min + (v / 100) * (range.max - range.min))
         }
@@ -166,26 +306,24 @@ export function GlobalControls() {
 
     const handleSliderCommit = (value: number[]) => {
         if (debounceRef.current) { clearTimeout(debounceRef.current); debounceRef.current = null }
-        if (synchronized && hasPairs && firstPair) applyPhysicalFromSliderValue(value[0])
+        if (!synchronized || !hasPairs || !firstPair) return
+        if (syncMode === 'union') {
+            setGlobalSliceNormalized(value[0] / 100)
+            return
+        }
+        applyPhysicalFromSliderValue(value[0])
     }
 
     const handleGlobalReset = async () => {
         pairArray.forEach((p) => resetPairView(p.pairId))
         if (synchronized && firstPair) {
-            const cached = rangeCacheRef.current
-            const hit = cached?.pairId === firstPair.pairId && cached?.ori === orientation
-            if (hit && cached) {
-                setGlobalSlicePhysical(cached.range.min)
+            if (syncMode === 'union') {
+                setGlobalSliceNormalized(0)
                 setSliderValue(0)
             } else {
-                try {
-                    const range = await getPhysicalRange(firstPair.pairId, maxSliceIndex, orientation)
-                    rangeCacheRef.current = { pairId: firstPair.pairId, maxIdx: maxSliceIndex, ori: orientation, range }
-                    setGlobalSlicePhysical(range.min)
-                    setSliderValue(0)
-                } catch {
-                    setSliderValue(0)
-                }
+                const range = currentRange ?? rangeCacheRef.current?.range ?? null
+                if (range) setGlobalSlicePhysical(range.min)
+                setSliderValue(0)
             }
         }
         toast.success('All views reset', { description: `Reset ${pairArray.length} panel${pairArray.length !== 1 ? 's' : ''}` })
@@ -207,7 +345,7 @@ export function GlobalControls() {
                         const segs = getPairSegVolumes(p)
                         const firstSeg = segs[0]
                         const data = firstSeg
-                            ? await fetchFirstSliceWithMask(firstSeg.volumeId, p.orientation ?? 'axial')
+                            ? await fetchFirstSliceWithMask(firstSeg.volumeId, p.orientation ?? 'axial', true)
                             : { slice_index: 0 }
                         return { pairId: p.pairId, slice_index: data.slice_index }
                     })
@@ -216,23 +354,20 @@ export function GlobalControls() {
                 if (synchronized && firstPair) {
                     const first = results.find((r) => r.pairId === firstPair.pairId)
                     if (first) {
-                        const physicalPosition = await convertIndexToPhysical(
-                            firstPair.pairId,
-                            first.slice_index,
-                            ori
-                        )
+                        const meta =
+                            ctMetas[pairArray.findIndex((p) => p.pairId === firstPair.pairId)] ??
+                            firstPairMetadata?.ct_metadata ??
+                            null
+                        const range = currentRange ?? rangeCacheRef.current?.range ?? null
+                        if (!meta || !range) return
+                        const physicalPosition = clamp(physicalAtIndex(meta, first.slice_index, ori), range.min, range.max)
                         setGlobalSlicePhysical(physicalPosition)
-                        const cached = rangeCacheRef.current
-                        const hit = cached?.pairId === firstPair.pairId && cached?.ori === ori
-                        const range = hit ? cached!.range : await getPhysicalRange(firstPair.pairId, maxSliceIndex, ori)
-                        if (!hit) {
-                            rangeCacheRef.current = { pairId: firstPair.pairId, maxIdx: maxSliceIndex, ori, range }
-                        }
+                        rangeCacheRef.current = { key: rangeKey, range }
                         const r = range.max - range.min
                         setSliderValue(r !== 0 ? Math.round(((physicalPosition - range.min) / r) * 100) : 0)
                     }
                 }
-                toast.success('Snap to mask on', { description: 'All panels moved to first slice with segmentation' })
+                toast.success('Snap to mask on', { description: 'All panels moved to middle of first mask' })
             } catch (e) {
                 console.error('Failed to snap to mask:', e)
                 toast.error('Could not snap to mask', { description: e instanceof Error ? e.message : 'Unknown error' })
@@ -284,7 +419,7 @@ export function GlobalControls() {
                                                     Rejected cases are moved to sibling folders:
                                                     <div className="mt-1 font-mono text-xs">
                                                         images_rejected/<br />
-                                                    segmentations_rejected/
+                                                        segmentations_rejected/
                                                     </div>
                                                 </li>
                                             </ul>
@@ -447,8 +582,54 @@ export function GlobalControls() {
                                 <Unlink className="h-4 w-4 text-muted-foreground" />
                             )}
                             <Label htmlFor="global-sync" className="cursor-pointer">
-                                Synchronize All Panels
+                                Synchronize Panels
                             </Label>
+                            <Dialog open={syncInfoOpen} onOpenChange={setSyncInfoOpen}>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    onClick={() => setSyncInfoOpen(true)}
+                                    aria-label="Synchronization info"
+                                >
+                                    <Info className="h-4 w-4" />
+                                </Button>
+                                <DialogContent className="sm:max-w-[520px]">
+                                    <DialogHeader>
+                                        <DialogTitle>Synchronization</DialogTitle>
+                                    </DialogHeader>
+                                    <div className="space-y-3 text-sm text-muted-foreground">
+                                        <div>
+                                            <div className="font-medium text-foreground">What it does</div>
+                                            <div>
+                                                The global slider controls slice position in physical space (mm), not “slice number”.
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="font-medium text-foreground">Range modes</div>
+                                            <ul className="list-disc pl-5 space-y-1">
+                                                <li><span className="text-foreground">Shared overlap</span>: physical-mm sync over the region all panels share (best default).</li>
+                                                <li><span className="text-foreground">All slices</span>: sync by normalized slice position (0–100%). Panels with fewer slices scrub faster.</li>
+                                                <li><span className="text-foreground">Reference</span>: physical-mm sync over one panel’s full range; other panels clamp when out of range.</li>
+                                            </ul>
+                                        </div>
+                                        <div>
+                                            <div className="font-medium text-foreground">Shared range</div>
+                                            <div>
+                                                When volumes have different origins, not every physical position exists in every volume.
+                                                While synced, the slider uses only the overlapping physical range so every panel updates.
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="font-medium text-foreground">Tip</div>
+                                            <div>
+                                                If a volume is cropped or shifted, syncing still works, but you will only scrub through the region all volumes share.
+                                            </div>
+                                        </div>
+                                    </div>
+                                </DialogContent>
+                            </Dialog>
                         </div>
                         <Switch
                             id="global-sync"
@@ -459,6 +640,49 @@ export function GlobalControls() {
                     </div>
 
                     {hasPairs && (
+                        <div className="space-y-2">
+                            <Label className="text-sm">Sync range</Label>
+                            <div className="flex items-center gap-2">
+                                <Select
+                                    value={syncMode}
+                                    onValueChange={(v) => setSyncMode(v as 'overlap' | 'union' | 'reference')}
+                                >
+                                    <SelectTrigger className="h-9">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="overlap">Shared overlap</SelectItem>
+                                    <SelectItem value="union">All slices</SelectItem>
+                                    <SelectItem value="reference">Reference</SelectItem>
+                                </SelectContent>
+                            </Select>
+                                {syncMode === 'reference' && (
+                                    <Select
+                                        value={syncRefPairId ?? (pairArray[0]?.pairId ?? '')}
+                                        onValueChange={(v) => setSyncRefPairId(v)}
+                                    >
+                                        <SelectTrigger className="h-9 w-[180px]">
+                                            <SelectValue placeholder="Reference panel" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {pairArray.map((p) => (
+                                                <SelectItem key={p.pairId} value={p.pairId}>
+                                                    Pair {p.pairId.slice(0, 8)}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                )}
+                            </div>
+                            {synchronized && syncMode !== 'overlap' && outOfRangeCount > 0 && (
+                                <p className="text-xs text-muted-foreground">
+                                    {outOfRangeCount} panel{outOfRangeCount !== 1 ? 's' : ''} out of range (clamped)
+                                </p>
+                            )}
+                        </div>
+                    )}
+
+                    {hasPairs && (
                         <div className="flex min-h-9 items-center justify-between">
                             <Label htmlFor="snap-pairs" className="cursor-pointer text-sm">
                                 Snap to mask
@@ -467,6 +691,19 @@ export function GlobalControls() {
                                 id="snap-pairs"
                                 checked={snapToMask}
                                 onCheckedChange={handleSnapToMaskToggle}
+                            />
+                        </div>
+                    )}
+
+                    {hasPairs && (
+                        <div className="flex min-h-9 items-center justify-between">
+                            <Label htmlFor="show-pair-controls" className="cursor-pointer text-sm">
+                                Show controls
+                            </Label>
+                            <Switch
+                                id="show-pair-controls"
+                                checked={pairArray.every((p) => pairControlsExpanded.get(p.pairId) !== false)}
+                                onCheckedChange={setAllPairsControlsExpanded}
                             />
                         </div>
                     )}
