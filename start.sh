@@ -77,8 +77,10 @@ if [ -x "venv/bin/python" ]; then
     nohup venv/bin/python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000 > ../backend.log 2>&1 &
 elif [ -x ".venv/bin/python" ]; then
     nohup .venv/bin/python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000 > ../backend.log 2>&1 &
+elif [ -x ".venv-packaging/bin/python" ]; then
+    nohup .venv-packaging/bin/python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000 > ../backend.log 2>&1 &
 else
-    nohup python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000 > ../backend.log 2>&1 &
+    nohup python3 -m uvicorn main:app --reload --host 0.0.0.0 --port 8000 > ../backend.log 2>&1 &
 fi
 BACKEND_PID=$!
 cd ..
@@ -93,6 +95,12 @@ fi
 print_success "Backend started (PID: $BACKEND_PID)"
 
 print_status "Starting frontend server..."
+
+# Ensure frontend deps are installed
+if [ ! -d "frontend/node_modules" ]; then
+    print_status "Installing frontend dependencies..."
+    (cd frontend && npm install)
+fi
 
 # Start frontend
 cd frontend
