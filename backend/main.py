@@ -12,8 +12,6 @@ import time
 import traceback
 from datetime import datetime
 
-import numpy as np
-import SimpleITK as sitk
 from services.volume_loader import VolumeLoaderService, VolumeLoadError, VolumeMetadata
 from services.geometry_validator import GeometryValidatorService, GeometryMismatchError
 from services.slice_extractor import SliceExtractorService, SliceExtractionError
@@ -144,7 +142,7 @@ class VolumeMetadataResponse(BaseModel):
 
 class CreatePairRequest(BaseModel):
     ct_volume_id: str
-    seg_volume_id: str
+    seg_volume_id: Optional[str] = None
     auto_resample: bool = False
 
 
@@ -153,14 +151,22 @@ class CreatePairResponse(BaseModel):
     compatible: bool
     resampled: bool
     ct_metadata: VolumeMetadataResponse
-    seg_metadata: VolumeMetadataResponse
+    seg_metadata: Optional[VolumeMetadataResponse] = None
+
+
+class SegmentationStats(BaseModel):
+    all_background: bool
+    component_count: int
+    multi_label: bool
+    nonzero_label_count: int
 
 
 class PairMetadataResponse(BaseModel):
     pair_id: str
     ct_metadata: VolumeMetadataResponse
-    seg_metadata: VolumeMetadataResponse
+    seg_metadata: Optional[VolumeMetadataResponse] = None
     seg_metadatas: list[VolumeMetadataResponse]
+    seg_stats: list[SegmentationStats] = []
 
 
 class AddSegmentRequest(BaseModel):
@@ -215,6 +221,10 @@ class SegmentationVolumeInfo(BaseModel):
     role: Optional[str] = None
     name: Optional[str] = None
     all_background: Optional[bool] = None
+    component_count: Optional[int] = None
+    multi_label: Optional[bool] = None
+    nonzero_label_count: Optional[int] = None
+    label_values: Optional[list[int]] = None
 
 
 class OpenCaseResponse(BaseModel):
@@ -385,71 +395,60 @@ async def delete_volume(volume_id: str):
 
 @app.post("/api/pairs", response_model=CreatePairResponse)
 async def create_pair(request: CreatePairRequest):
-    """Create CT-segmentation pair; validate geometry; optionally resample."""
+    """Create CT-segmentation pair; optionally CT-only (no seg). Validate geometry when seg present."""
     try:
         logger.info(
             f"Creating pair: ct={request.ct_volume_id}, seg={request.seg_volume_id}, "
             f"auto_resample={request.auto_resample}"
         )
-        
-        # Get volume metadata
         ct_metadata = volume_loader.get_metadata(request.ct_volume_id)
-        seg_metadata = volume_loader.get_metadata(request.seg_volume_id)
-        
-        # Validate geometry
-        validation_result = geometry_validator.validate_geometry(ct_metadata, seg_metadata)
-        
         resampled = False
-        
-        if not validation_result.compatible:
-            if request.auto_resample:
-                # Resample segmentation to match CT
-                logger.info(f"Geometry mismatch detected, resampling segmentation {request.seg_volume_id}")
-                
-                ct_volume = volume_loader.get_volume(request.ct_volume_id)
-                seg_volume = volume_loader.get_volume(request.seg_volume_id)
-                
-                try:
-                    resample_start = time.time()
-                    resampled_seg = resampler.resample_segmentation_to_ct(seg_volume, ct_volume)
-                    resample_time = time.time() - resample_start
-                    
-                    volume_loader.replace_volume(request.seg_volume_id, resampled_seg)
-                    seg_metadata = volume_loader.get_metadata(request.seg_volume_id)
-                    
-                    resampled = True
-                    logger.info(
-                        f"Successfully resampled segmentation {request.seg_volume_id} "
-                        f"in {resample_time:.3f}s"
-                    )
-                    
-                except ResamplingError as e:
-                    logger.error(f"Resampling failed: {e}", exc_info=True)
-                    raise HTTPException(status_code=500, detail=f"Resampling failed: {str(e)}")
-            else:
-                # Reject pair creation
-                error_message = geometry_validator.format_validation_error(validation_result)
-                logger.warning(f"Pair creation rejected due to geometry mismatch: {error_message}")
-                raise HTTPException(status_code=400, detail=error_message)
-        
+        seg_metadata = None
+
+        if request.seg_volume_id:
+            seg_metadata = volume_loader.get_metadata(request.seg_volume_id)
+            validation_result = geometry_validator.validate_geometry(ct_metadata, seg_metadata)
+            if not validation_result.compatible:
+                if request.auto_resample:
+                    logger.info(f"Geometry mismatch detected, resampling segmentation {request.seg_volume_id}")
+                    ct_volume = volume_loader.get_volume(request.ct_volume_id)
+                    seg_volume = volume_loader.get_volume(request.seg_volume_id)
+                    try:
+                        resample_start = time.time()
+                        resampled_seg = resampler.resample_segmentation_to_ct(seg_volume, ct_volume)
+                        resample_time = time.time() - resample_start
+                        volume_loader.replace_volume(request.seg_volume_id, resampled_seg)
+                        seg_metadata = volume_loader.get_metadata(request.seg_volume_id)
+                        resampled = True
+                        logger.info(
+                            f"Successfully resampled segmentation {request.seg_volume_id} "
+                            f"in {resample_time:.3f}s"
+                        )
+                    except ResamplingError as e:
+                        logger.error(f"Resampling failed: {e}", exc_info=True)
+                        raise HTTPException(status_code=500, detail=f"Resampling failed: {str(e)}")
+                else:
+                    error_message = geometry_validator.format_validation_error(validation_result)
+                    logger.warning(f"Pair creation rejected due to geometry mismatch: {error_message}")
+                    raise HTTPException(status_code=400, detail=error_message)
+
         pair_id = str(uuid.uuid4())
+        seg_ids = [request.seg_volume_id] if request.seg_volume_id else []
         pairs_storage[pair_id] = {
             "pair_id": pair_id,
             "ct_volume_id": request.ct_volume_id,
             "seg_volume_id": request.seg_volume_id,
-            "seg_volume_ids": [request.seg_volume_id],
+            "seg_volume_ids": seg_ids,
             "resampled": resampled,
-            "created_at": datetime.now()
+            "created_at": datetime.now(),
         }
-        
-        logger.info(f"Created pair {pair_id}: CT={request.ct_volume_id}, Seg={request.seg_volume_id}")
-        
+        logger.info(f"Created pair {pair_id}: CT={request.ct_volume_id}, Seg={request.seg_volume_id or 'none'}")
         return CreatePairResponse(
             pair_id=pair_id,
             compatible=True,
             resampled=resampled,
             ct_metadata=metadata_to_response(ct_metadata),
-            seg_metadata=metadata_to_response(seg_metadata)
+            seg_metadata=metadata_to_response(seg_metadata) if seg_metadata else None,
         )
         
     except VolumeLoadError as e:
@@ -475,7 +474,7 @@ def _pair_seg_volume_ids(pair: dict) -> list:
 
 @app.get("/api/pairs/{pair_id}", response_model=PairMetadataResponse)
 async def get_pair_metadata(pair_id: str):
-    """Retrieve metadata for a CT-segmentation pair"""
+    """Retrieve metadata for a CT-segmentation pair (CT-only pairs have no seg_metadata)."""
     if pair_id not in pairs_storage:
         raise HTTPException(status_code=404, detail=f"Pair not found: {pair_id}")
     try:
@@ -484,13 +483,13 @@ async def get_pair_metadata(pair_id: str):
         seg_ids = _pair_seg_volume_ids(pair)
         seg_metadatas = [metadata_to_response(volume_loader.get_metadata(sid)) for sid in seg_ids]
         first_seg = seg_metadatas[0] if seg_metadatas else None
-        if not first_seg:
-            raise HTTPException(status_code=404, detail="Pair has no segmentation volume")
+        seg_stats = [SegmentationStats(**volume_loader.get_label_stats(sid)) for sid in seg_ids]
         return PairMetadataResponse(
             pair_id=pair_id,
             ct_metadata=metadata_to_response(ct_metadata),
             seg_metadata=first_seg,
-            seg_metadatas=seg_metadatas
+            seg_metadatas=seg_metadatas,
+            seg_stats=seg_stats,
         )
     except VolumeLoadError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -528,11 +527,13 @@ async def add_segment_to_pair(pair_id: str, request: AddSegmentRequest):
         pair["seg_volume_ids"] = seg_ids
         pair["seg_volume_id"] = seg_ids[0]
         seg_metadatas = [metadata_to_response(volume_loader.get_metadata(sid)) for sid in seg_ids]
+        seg_stats = [SegmentationStats(**volume_loader.get_label_stats(sid)) for sid in seg_ids]
         return PairMetadataResponse(
             pair_id=pair_id,
             ct_metadata=metadata_to_response(ct_metadata),
             seg_metadata=seg_metadatas[0],
-            seg_metadatas=seg_metadatas
+            seg_metadatas=seg_metadatas,
+            seg_stats=seg_stats,
         )
     except VolumeLoadError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -671,12 +672,12 @@ async def open_dataset_case(dataset_id: str, body: OpenCaseRequest):
         meta = await volume_loader.load_volume(path)
         ds["last_opened_volume_ids"].append(meta.volume_id)
         all_bg = None
+        seg_stats = None
         try:
-            seg_vol = volume_loader.get_volume(meta.volume_id)
-            arr = np.asarray(sitk.GetArrayFromImage(seg_vol))
-            all_bg = bool(np.count_nonzero(arr) == 0)
+            seg_stats = volume_loader.get_label_stats(meta.volume_id)
+            all_bg = seg_stats.get("all_background")
         except Exception as e:
-            logger.warning(f"Could not check segmentation foreground: {e}")
+            logger.warning(f"Could not check segmentation stats: {e}")
             all_bg = None
         try:
             validation = geometry_validator.validate_geometry(image_meta, meta)
@@ -695,6 +696,10 @@ async def open_dataset_case(dataset_id: str, body: OpenCaseRequest):
                 role=role,
                 name=name,
                 all_background=all_bg,
+                component_count=seg_stats["component_count"] if seg_stats else None,
+                multi_label=seg_stats["multi_label"] if seg_stats else None,
+                nonzero_label_count=seg_stats["nonzero_label_count"] if seg_stats else None,
+                label_values=seg_stats.get("label_values") if seg_stats else None,
             )
         )
 

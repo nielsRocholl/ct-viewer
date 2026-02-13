@@ -24,7 +24,7 @@ import {
     submitDatasetDecision,
 } from '@/lib/api-client'
 import { toast } from 'sonner'
-import { generateDistinctColor, DEFAULT_PRED_COLOR } from '@/lib/color-utils'
+import { generateDistinctColor, DEFAULT_PRED_COLOR, createColorMapFromPalette } from '@/lib/color-utils'
 import { downloadCanvasAsJpeg } from '@/lib/utils'
 import { VolumeInfoCard } from './volume-info-card'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
@@ -39,6 +39,17 @@ const DEFAULT_WINDOW_WIDTH = 400
 const DEFAULT_ZOOM = 1
 const DEFAULT_PAN = { x: 0, y: 0 }
 const DEFAULT_OVERLAY_OPACITY = 0.5
+
+const healthExplain = (label: string): string => {
+    if (label.startsWith('Mask ')) return 'Mask metadata loaded and geometry matches CT.'
+    if (label === 'Mask content') return 'Mask has foreground voxels.'
+    if (label === 'CT slice') return 'CT slices are accessible.'
+    if (label === 'CT dimensions') return 'All CT dimensions are positive.'
+    if (label === 'CT spacing') return 'All spacing values are positive.'
+    if (label === 'CT anisotropy') return 'Max spacing / min spacing ratio is within range.'
+    if (label === 'CT orientation') return 'Direction matrix is orthonormal.'
+    return 'Check status.'
+}
 
 type DatasetSeg = DatasetCaseState['segVolumes'][number]
 
@@ -87,7 +98,20 @@ export function DatasetViewerPanel() {
     const lastSizeRef = useRef({ width: 512, height: 512 })
     const [canvasSize, setCanvasSize] = useState({ width: 512, height: 512 })
     const canvasRendererRef = useRef<CanvasRendererHandle>(null)
+    const snapRequestRef = useRef(0)
+    const prefetchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const prefetchRequestIdRef = useRef(0)
     const segList = useMemo(() => datasetCase?.segVolumes ?? [], [datasetCase?.segVolumes])
+    const segColorMaps = useMemo(() => {
+        const maps = new Map<string, Map<number, string>>()
+        segList.forEach((seg) => {
+            if (seg.multiLabel && seg.labelValues && seg.labelValues.length > 1) {
+                const colorMap = createColorMapFromPalette(seg.labelValues, 'colorblind')
+                maps.set(seg.volumeId, colorMap)
+            }
+        })
+        return maps
+    }, [segList])
     const getSegColor = (seg: DatasetSeg, index: number) =>
         seg.color ?? (seg.role === 'pred' ? DEFAULT_PRED_COLOR : generateDistinctColor(index, segList.length))
 
@@ -118,20 +142,62 @@ export function DatasetViewerPanel() {
         [datasetCase, setDatasetCase]
     )
 
+    const volumeId = useMemo(() => {
+        if (segList.length === 0) return null
+        const hasForeground = (s: DatasetSeg) =>
+            (s.nonzeroLabelCount ?? 0) > 0 || (s.labelValues?.length ?? 0) > 0 || s.allBackground === false
+        const candidates = segList.filter(hasForeground)
+        const preferred =
+            candidates.find((s) => s.role === 'gt') ??
+            candidates[0] ??
+            segList.find((s) => s.role === 'gt') ??
+            segList[0]
+        return preferred?.volumeId ?? null
+    }, [segList])
+    
     useEffect(() => {
-        setSliceIndex(0)
+        const requestId = ++snapRequestRef.current
+        let retryTimer: ReturnType<typeof setTimeout> | null = null
         setOrientation('axial')
         setClickedXyz(null)
         setClickedVoxel(null)
-    }, [datasetCase?.caseIndex, datasetCase?.imageVolumeId])
+        
+        const trySnap = (attempt: number) => {
+            if (!volumeId) return
+            fetchFirstSliceWithMask(volumeId, 'axial', true)
+                .then((data) => {
+                    if (requestId !== snapRequestRef.current) return
+                    setSliceIndex(data.slice_index)
+                })
+                .catch(() => {
+                    if (requestId !== snapRequestRef.current) return
+                    if (attempt < 2) {
+                        retryTimer = setTimeout(() => trySnap(attempt + 1), 200 * (attempt + 1))
+                    }
+                })
+        }
 
-    const volumeId = segList.find((s) => s.role === 'gt')?.volumeId ?? segList[0]?.volumeId ?? null
+        if (snapToMask && volumeId && datasetCase) {
+            trySnap(0)
+        } else {
+            setSliceIndex(0)
+        }
+        return () => {
+            if (retryTimer) clearTimeout(retryTimer)
+        }
+    }, [datasetCase?.caseIndex, datasetCase?.imageVolumeId, datasetCase?.segVolumes, snapToMask, volumeId, datasetCase])
+
     useEffect(() => {
-        if (!snapToMask || !volumeId || !datasetCase) return
+        if (!snapToMask || !volumeId || !datasetCase) {
+            return
+        }
+        if (orientation === 'axial') {
+            return
+        }
         fetchFirstSliceWithMask(volumeId, orientation, true)
             .then((data) => setSliceIndex(data.slice_index))
-            .catch(() => { })
-    }, [snapToMask, datasetCase, volumeId, orientation])
+            .catch(() => {})
+    }, [snapToMask, volumeId, orientation, datasetCase])
 
     useEffect(() => {
         setClickedXyz(null)
@@ -142,21 +208,25 @@ export function DatasetViewerPanel() {
         const el = canvasContainerRef.current
         if (!el) return
         let rafId = 0
-        const MIN_DELTA = 8
+        let debounceTimer: ReturnType<typeof setTimeout> | null = null
+        const MIN_DELTA = 16
         const ro = new ResizeObserver(() => {
-            if (rafId) cancelAnimationFrame(rafId)
-            rafId = requestAnimationFrame(() => {
-                rafId = 0
-                const cw = el.clientWidth
-                const ch = el.clientHeight
-                const w = Math.max(1, (cw >> 1) << 1)
-                const h = Math.max(1, (ch >> 1) << 1)
-                const last = lastSizeRef.current
-                if (Math.abs(w - last.width) >= MIN_DELTA || Math.abs(h - last.height) >= MIN_DELTA) {
-                    lastSizeRef.current = { width: w, height: h }
-                    setCanvasSize({ width: w, height: h })
-                }
-            })
+            if (debounceTimer) clearTimeout(debounceTimer)
+            debounceTimer = setTimeout(() => {
+                if (rafId) cancelAnimationFrame(rafId)
+                rafId = requestAnimationFrame(() => {
+                    rafId = 0
+                    const cw = el.clientWidth
+                    const ch = el.clientHeight
+                    const w = Math.max(1, (cw >> 1) << 1)
+                    const h = Math.max(1, (ch >> 1) << 1)
+                    const last = lastSizeRef.current
+                    if (Math.abs(w - last.width) >= MIN_DELTA || Math.abs(h - last.height) >= MIN_DELTA) {
+                        lastSizeRef.current = { width: w, height: h }
+                        setCanvasSize({ width: w, height: h })
+                    }
+                })
+            }, 100)
         })
         ro.observe(el)
         const w = Math.max(1, (el.clientWidth >> 1) << 1)
@@ -167,6 +237,7 @@ export function DatasetViewerPanel() {
         }
         return () => {
             if (rafId) cancelAnimationFrame(rafId)
+            if (debounceTimer) clearTimeout(debounceTimer)
             ro.disconnect()
         }
     }, [])
@@ -227,7 +298,9 @@ export function DatasetViewerPanel() {
         }
     }, [updateFrameSize])
     useEffect(() => {
-        if (sliceIndex > maxSliceIndex && maxSliceIndex >= 0) setSliceIndex(maxSliceIndex)
+        if (sliceIndex > maxSliceIndex && maxSliceIndex > 0) {
+            setSliceIndex(maxSliceIndex)
+        }
     }, [orientation, imageMeta?.dimensions, sliceIndex, maxSliceIndex])
 
     const { data: ctSliceUrl, error: ctSliceError } = useCTSlice(
@@ -254,53 +327,73 @@ export function DatasetViewerPanel() {
     const segErrors = segQueries.map((q) => (q.error instanceof Error ? q.error : null))
 
     useEffect(() => {
-        if (!datasetCase) return
-        const maxIdx = maxSliceIndex
-        if (maxIdx < 0) return
-        const base = {
-            volume_id: datasetCase.imageVolumeId,
-            orientation,
-            window_level: windowLevel,
-            window_width: windowWidth,
-            format: 'png' as const,
+        if (prefetchDebounceRef.current) {
+            clearTimeout(prefetchDebounceRef.current)
+            prefetchDebounceRef.current = null
         }
-        const idxs = [sliceIndex - 1, sliceIndex + 1]
-        idxs.forEach((idx) => {
-            if (idx < 0 || idx > maxIdx) return
-            const params = { ...base, slice_index: idx }
-            queryClient.prefetchQuery({
-                queryKey: queryKeys.ctSlice(params),
-                queryFn: () => fetchCTSlice(params),
-                staleTime: 5 * 60 * 1000,
-                gcTime: 10 * 60 * 1000,
-            })
-        })
-    }, [datasetCase, sliceIndex, orientation, windowLevel, windowWidth, maxSliceIndex, queryClient])
+        prefetchRequestIdRef.current += 1
+        const requestId = prefetchRequestIdRef.current
 
-    useEffect(() => {
-        if (!datasetCase || segList.length === 0) return
-        const maxIdx = maxSliceIndex
-        if (maxIdx < 0) return
-        const idxs = [sliceIndex - 1, sliceIndex + 1]
-        idxs.forEach((slice_index) => {
-            if (slice_index < 0 || slice_index > maxIdx) return
-            segList.forEach((s) => {
-                const params = {
-                    volume_id: s.volumeId,
-                    slice_index,
-                    orientation,
-                    mode: (s.mode ?? 'filled') as 'filled' | 'boundary',
-                    format: 'png' as const,
-                }
+        prefetchDebounceRef.current = setTimeout(() => {
+            prefetchDebounceRef.current = null
+            if (requestId !== prefetchRequestIdRef.current) return
+
+            if (!datasetCase) return
+            const maxIdx = maxSliceIndex
+            if (maxIdx < 0) return
+            const base = {
+                volume_id: datasetCase.imageVolumeId,
+                orientation,
+                window_level: windowLevel,
+                window_width: windowWidth,
+                format: 'png' as const,
+            }
+            const idxs = [sliceIndex - 1, sliceIndex + 1]
+            let prefetchCount = 0
+            const MAX_CONCURRENT_PREFETCH = 3
+            idxs.forEach((idx) => {
+                if (idx < 0 || idx > maxIdx || prefetchCount >= MAX_CONCURRENT_PREFETCH) return
+                prefetchCount++
+                const params = { ...base, slice_index: idx }
                 queryClient.prefetchQuery({
-                    queryKey: queryKeys.segSlice(params),
-                    queryFn: () => fetchSegmentationSlice(params),
+                    queryKey: queryKeys.ctSlice(params),
+                    queryFn: () => fetchCTSlice(params),
                     staleTime: 5 * 60 * 1000,
                     gcTime: 10 * 60 * 1000,
                 })
             })
-        })
-    }, [datasetCase, segList, sliceIndex, orientation, maxSliceIndex, queryClient])
+
+            if (!datasetCase || segList.length === 0) return
+            prefetchCount = 0
+            idxs.forEach((slice_index) => {
+                if (slice_index < 0 || slice_index > maxIdx || prefetchCount >= MAX_CONCURRENT_PREFETCH) return
+                segList.forEach((s) => {
+                    if (prefetchCount >= MAX_CONCURRENT_PREFETCH) return
+                    prefetchCount++
+                    const params = {
+                        volume_id: s.volumeId,
+                        slice_index,
+                        orientation,
+                        mode: (s.mode ?? 'filled') as 'filled' | 'boundary',
+                        format: 'png' as const,
+                    }
+                    queryClient.prefetchQuery({
+                        queryKey: queryKeys.segSlice(params),
+                        queryFn: () => fetchSegmentationSlice(params),
+                        staleTime: 5 * 60 * 1000,
+                        gcTime: 10 * 60 * 1000,
+                    })
+                })
+            })
+        }, 500)
+
+        return () => {
+            if (prefetchDebounceRef.current) {
+                clearTimeout(prefetchDebounceRef.current)
+                prefetchDebounceRef.current = null
+            }
+        }
+    }, [datasetCase, segList, sliceIndex, orientation, windowLevel, windowWidth, maxSliceIndex, queryClient])
 
     useEffect(() => {
         if (!windowDraggingRef.current) {
@@ -483,13 +576,35 @@ export function DatasetViewerPanel() {
                             role: s.role,
                             name: s.name,
                             allBackground: s.all_background ?? null,
+                            componentCount: s.component_count ?? null,
+                            multiLabel: s.multi_label ?? null,
+                            nonzeroLabelCount: s.nonzero_label_count ?? null,
+                            labelValues: s.label_values ?? null,
                         })) ??
                         [
                             ...(next.label_volume_id
-                                ? [{ volumeId: next.label_volume_id, role: 'gt' as const, name: 'Label', allBackground: next.label_all_background ?? null }]
+                                ? [{
+                                    volumeId: next.label_volume_id,
+                                    role: 'gt' as const,
+                                    name: 'Label',
+                                    allBackground: next.label_all_background ?? null,
+                                    componentCount: null,
+                                    multiLabel: null,
+                                    nonzeroLabelCount: null,
+                                    labelValues: null,
+                                }]
                                 : []),
                             ...(next.pred_volume_id
-                                ? [{ volumeId: next.pred_volume_id, role: 'pred' as const, name: 'Prediction', allBackground: null }]
+                                ? [{
+                                    volumeId: next.pred_volume_id,
+                                    role: 'pred' as const,
+                                    name: 'Prediction',
+                                    allBackground: null,
+                                    componentCount: null,
+                                    multiLabel: null,
+                                    nonzeroLabelCount: null,
+                                    labelValues: null,
+                                }]
                                 : []),
                         ]
                     const segVolumes = mergeSegDisplay(datasetCase.segVolumes, segVolumesRaw)
@@ -525,6 +640,23 @@ export function DatasetViewerPanel() {
         downloadCanvasAsJpeg(canvas, base)
         toast.success('Slice downloaded')
     }, [datasetCase, sliceIndex])
+
+    const labelStats = useMemo(
+        () =>
+            segList.map((seg, i) => {
+                const name = seg.name ?? (seg.role === 'pred' ? 'Prediction' : seg.role === 'gt' ? 'Label' : `Segmentation ${i + 1}`)
+                return {
+                    name,
+                    stats: {
+                        all_background: seg.allBackground ?? null,
+                        component_count: seg.componentCount ?? null,
+                        multi_label: seg.multiLabel ?? null,
+                        nonzero_label_count: seg.nonzeroLabelCount ?? null,
+                    },
+                }
+            }),
+        [segList]
+    )
 
     if (!datasetCase) return null
 
@@ -612,6 +744,34 @@ export function DatasetViewerPanel() {
                                     </Popover>
                                     <Popover>
                                         <PopoverTrigger asChild>
+                                            <Button variant="outline" size="sm" className="text-xs">
+                                                Segmentation Info
+                                            </Button>
+                                        </PopoverTrigger>
+                                        <PopoverContent
+                                            className="w-[var(--radix-popover-trigger-width)] max-w-[90vw] min-w-[260px]"
+                                            align="end"
+                                        >
+                                            <div className="space-y-3 text-xs">
+                                                <div className="text-sm font-medium text-foreground">Segmentation Info</div>
+                                                <div className="space-y-2 rounded-md border bg-muted/30 p-2">
+                                                    {labelStats.map((s, i) => (
+                                                        <div key={`${s.name}-${i}`} className="space-y-1">
+                                                            <div className="text-foreground">{s.name}</div>
+                                                            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+                                                                <div>Foreground: {s.stats.all_background === null ? 'Unknown' : s.stats.all_background ? 'No' : 'Yes'}</div>
+                                                                <div>Components: {s.stats.component_count ?? '—'}</div>
+                                                                <div>Multi‑label: {s.stats.multi_label === null ? '—' : s.stats.multi_label ? 'Yes' : 'No'}</div>
+                                                                <div>Labels: {s.stats.nonzero_label_count ?? '—'}</div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </PopoverContent>
+                                    </Popover>
+                                    <Popover>
+                                        <PopoverTrigger asChild>
                                             <button type="button" aria-label="Health status">
                                                 <Badge
                                                     className={`h-8 min-w-7 rounded-sm p-0 flex items-center justify-center text-xs font-semibold ${healthBadgeClass}`}
@@ -646,14 +806,23 @@ export function DatasetViewerPanel() {
                                                                 <div className="text-foreground">{d.label}</div>
                                                                 <div className="text-muted-foreground">{d.message}</div>
                                                             </div>
-                                                            <Badge
-                                                                className={`h-4 w-4 rounded-full p-0 ${d.status === 'red'
-                                                                    ? 'bg-red-500 text-white'
-                                                                    : d.status === 'orange'
-                                                                        ? 'bg-amber-500 text-black'
-                                                                        : 'bg-emerald-500 text-white'
-                                                                    }`}
-                                                            />
+                                                            <Popover>
+                                                                <PopoverTrigger asChild>
+                                                                    <button type="button" aria-label={`${d.label} explanation`}>
+                                                                        <Badge
+                                                                            className={`h-4 w-4 rounded-full p-0 ${d.status === 'red'
+                                                                                ? 'bg-red-500 text-white'
+                                                                                : d.status === 'orange'
+                                                                                    ? 'bg-amber-500 text-black'
+                                                                                    : 'bg-emerald-500 text-white'
+                                                                                }`}
+                                                                        />
+                                                                    </button>
+                                                                </PopoverTrigger>
+                                                                <PopoverContent className="max-w-[220px]" align="end">
+                                                                    <div className="text-xs text-foreground">{healthExplain(d.label)}</div>
+                                                                </PopoverContent>
+                                                            </Popover>
                                                         </div>
                                                     ))}
                                                 </div>
@@ -687,12 +856,16 @@ export function DatasetViewerPanel() {
                                             overlayOpacity={overlayOpacity}
                                             overlayVisible={segList.some((s) => s.visible !== false)}
                                             colorMap={new Map()}
-                                            overlayLayers={segList.map((s, i) => ({
-                                                url: segSliceUrls[i] ?? null,
-                                                colorMap: new Map([[1, getSegColor(s, i)]]),
-                                                opacity: overlayOpacity,
-                                                visible: s.visible !== false,
-                                            }))}
+                                            overlayLayers={segList.map((s, i) => {
+                                                const multiLabelColorMap = segColorMaps.get(s.volumeId)
+                                                const colorMap = multiLabelColorMap ?? new Map([[1, getSegColor(s, i)]])
+                                                return {
+                                                    url: segSliceUrls[i] ?? null,
+                                                    colorMap,
+                                                    opacity: overlayOpacity,
+                                                    visible: s.visible !== false,
+                                                }
+                                            })}
                                             zoom={zoom}
                                             pan={pan}
                                             windowLevel={windowLevel}
@@ -807,16 +980,26 @@ export function DatasetViewerPanel() {
                             </Button>
                         </div>
                         <div className="space-y-3 border-t pt-3">
-                            {segList.map((s, i) => (
-                                <div key={`${s.volumeId}-${i}`} className="flex items-center gap-2 min-w-0">
-                                    <span
-                                        className="h-3 w-3 rounded border border-border shrink-0"
-                                        style={{ backgroundColor: getSegColor(s, i) }}
-                                        aria-hidden
-                                    />
-                                    <Label className="text-xs min-w-0 flex-1 truncate">
-                                        {s.name || (s.role === 'pred' ? 'Prediction' : s.role === 'gt' ? 'Label' : `Mask ${i + 1}`)}
-                                    </Label>
+                            {segList.map((s, i) => {
+                                const multiLabelColorMap = segColorMaps.get(s.volumeId)
+                                const colors = multiLabelColorMap
+                                    ? Array.from(multiLabelColorMap.values())
+                                    : [getSegColor(s, i)]
+                                return (
+                                    <div key={`${s.volumeId}-${i}`} className="flex items-center gap-2 min-w-0">
+                                        <div className="flex gap-0.5 shrink-0">
+                                            {colors.map((color, idx) => (
+                                                <span
+                                                    key={idx}
+                                                    className="h-3 w-3 rounded border border-border"
+                                                    style={{ backgroundColor: color }}
+                                                    aria-hidden
+                                                />
+                                            ))}
+                                        </div>
+                                        <Label className="text-xs min-w-0 flex-1 truncate">
+                                            {s.name || (s.role === 'pred' ? 'Prediction' : s.role === 'gt' ? 'Label' : `Mask ${i + 1}`)}
+                                        </Label>
                                     {s.role && (
                                         <Badge
                                             variant={s.role === 'pred' ? 'secondary' : 'default'}
@@ -859,8 +1042,9 @@ export function DatasetViewerPanel() {
                                             />
                                         </PopoverContent>
                                     </Popover>
-                                </div>
-                            ))}
+                                    </div>
+                                )
+                            })}
                             {segList.length > 0 && (
                                 <div className="space-y-2">
                                     <Label className="text-xs">Overlay opacity: {(overlayOpacity * 100).toFixed(0)}%</Label>
@@ -916,13 +1100,35 @@ export function DatasetNav() {
                         role: s.role,
                         name: s.name,
                         allBackground: s.all_background ?? null,
+                        componentCount: s.component_count ?? null,
+                        multiLabel: s.multi_label ?? null,
+                        nonzeroLabelCount: s.nonzero_label_count ?? null,
+                        labelValues: s.label_values ?? null,
                     })) ??
                     [
                         ...(res.label_volume_id
-                            ? [{ volumeId: res.label_volume_id, role: 'gt' as const, name: 'Label', allBackground: res.label_all_background ?? null }]
+                            ? [{
+                                volumeId: res.label_volume_id,
+                                role: 'gt' as const,
+                                name: 'Label',
+                                allBackground: res.label_all_background ?? null,
+                                componentCount: null,
+                                multiLabel: null,
+                                nonzeroLabelCount: null,
+                                labelValues: null,
+                            }]
                             : []),
                         ...(res.pred_volume_id
-                            ? [{ volumeId: res.pred_volume_id, role: 'pred' as const, name: 'Prediction', allBackground: null }]
+                            ? [{
+                                volumeId: res.pred_volume_id,
+                                role: 'pred' as const,
+                                name: 'Prediction',
+                                allBackground: null,
+                                componentCount: null,
+                                multiLabel: null,
+                                nonzeroLabelCount: null,
+                                labelValues: null,
+                            }]
                             : []),
                     ]
                 const segVolumes = mergeSegDisplay(datasetCase.segVolumes, segVolumesRaw)

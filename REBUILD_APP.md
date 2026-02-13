@@ -2,39 +2,62 @@
 
 This project ships a static Next.js frontend and a bundled Python backend.
 
+## Prerequisites
+
+- **Node.js** (for npm, frontend, Electron)
+- **Python 3** (for backend)
+- **macOS** (Apple Silicon recommended; build targets arm64)
+
 ## One-time setup
 
-1. Install root Node dependencies:
-   - `npm install`
-2. Create the packaging venv and install PyInstaller:
-   - `python3 -m venv backend/.venv-packaging`
-   - `backend/.venv-packaging/bin/python -m pip install pyinstaller`
+From the project root:
 
-## Full rebuild (frontend + backend + installer)
+```bash
+# 1. Install Node dependencies
+npm install
 
-- `npm run dist`
+# 2. Create Python virtual environment for packaging
+python3 -m venv backend/.venv-packaging
+
+# 3. Install backend dependencies and PyInstaller
+backend/.venv-packaging/bin/python -m pip install -r backend/requirements.txt
+backend/.venv-packaging/bin/python -m pip install pyinstaller
+```
+
+## Build the DMG
+
+```bash
+npm run dist
+```
 
 Outputs:
-- `dist/CT Segmentation Viewer-1.0.0-arm64.dmg`
-- `dist/CT Segmentation Viewer-1.0.0-arm64-mac.zip`
 
-## Rebuild only the installer (after frontend/backend already built)
+- `dist/MangoCT-1.0.0-arm64.dmg`
+- `dist/MangoCT-1.0.0-arm64-mac.zip`
 
-- `npm run build:app`
+## Partial rebuilds
 
-## Frontend-only changes
-
-1. `npm run build:frontend`
-2. `npm run build:app`
-
-## Backend-only changes
-
-1. `npm run build:backend`
-2. `npm run build:app`
+| Change type      | Commands                                      |
+|------------------|-----------------------------------------------|
+| Installer only   | `npm run build:app`                           |
+| Frontend only    | `npm run build:frontend` then `npm run build:app` |
+| Backend only     | `npm run build:backend` then `npm run build:app` |
 
 ## Notes
 
-- Packaged app runs a bundled backend binary on `127.0.0.1:8000`.
-- Static UI is served by a tiny local HTTP server inside Electron.
-- Logs for the packaged backend:
-  - `~/Library/Application Support/CT Segmentation Viewer/backend.log`
+- Packaged app runs a bundled backend on `127.0.0.1:8000`.
+- Backend logs: `~/Library/Application Support/MangoCT/backend.log`
+
+## Sharing the app with others
+
+The app is **unsigned**. Recipients may see "file is damaged" or "Backend failed to start" when opening it.
+
+**Workaround for recipients:** In Terminal run:
+
+```bash
+xattr -cr "/Applications/MangoCT.app"
+```
+
+Then open the app again.
+
+**Proper fix:** Sign and notarize with an Apple Developer ID ($99/year).

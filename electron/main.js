@@ -91,6 +91,25 @@ function appendLog(stream, line) {
   } catch (_) { }
 }
 
+function readLastLines(filePath, maxLines, maxBytes = 2048) {
+  try {
+    if (!fs.existsSync(filePath)) return ''
+    const buf = Buffer.alloc(maxBytes)
+    const fd = fs.openSync(filePath, 'r')
+    const stat = fs.fstatSync(fd)
+    const size = stat.size
+    const toRead = Math.min(size, maxBytes)
+    const start = size - toRead
+    fs.readSync(fd, buf, 0, toRead, start)
+    fs.closeSync(fd)
+    const tail = buf.slice(0, toRead).toString('utf8').replace(/\r\n/g, '\n').split('\n')
+    const lines = tail.slice(-maxLines).filter(Boolean)
+    return lines.join('\n').slice(-1500)
+  } catch (_) {
+    return ''
+  }
+}
+
 async function createWindow() {
   const isMac = process.platform === 'darwin'
   const iconPath = path.join(__dirname, '..', 'firefly-ct.ico')
@@ -100,19 +119,39 @@ async function createWindow() {
     icon: iconPath,
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     ...(isMac && { trafficLightPosition: { x: 16, y: 24 } }),
-    transparent: isMac,
-    backgroundColor: isMac ? '#00000000' : undefined,
+    show: false,
+    transparent: false,
+    backgroundColor: '#0b0b0b',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
+  mainWindow.once('ready-to-show', () => {
+    if (!mainWindow) return
+    mainWindow.show()
+  })
+
+  const loadSplash = async (message) => {
+    const msg = message || 'Starting MangoCT…'
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><style>
+      html,body{height:100%;margin:0;background:#0b0b0b;color:#e5e7eb;font:14px -apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;display:flex;align-items:center;justify-content:center;}
+      .box{display:flex;gap:10px;align-items:center;padding:12px 16px;border:1px solid #1f2937;border-radius:10px;background:#111827}
+      .dot{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 1.2s ease-in-out infinite;}
+      @keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+    </style></head><body><div class="box"><div class="dot"></div><div>${msg}</div></div></body></html>`
+    await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+  }
 
   if (app.isPackaged) {
+    await loadSplash()
     const backendPath = path.join(process.resourcesPath, 'ct-viewer-backend')
     const logPath = path.join(app.getPath('userData'), 'backend.log')
     const logStream = fs.createWriteStream(logPath, { flags: 'a' })
+    let backendExitedBeforeReady = false
+    let exitCode = null
+    let exitSignal = null
     backendProc = spawn(backendPath, [], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -123,23 +162,42 @@ async function createWindow() {
     if (backendProc.stderr) {
       backendProc.stderr.on('data', (buf) => appendLog(logStream, buf))
     }
-    backendProc.on('exit', () => {
+    backendProc.on('exit', (code, signal) => {
+      backendExitedBeforeReady = true
+      exitCode = code
+      exitSignal = signal
       backendProc = null
     })
     try {
       await waitForBackend('http://127.0.0.1:8000/health', 20000)
     } catch (err) {
-      dialog.showErrorBox(
-        'Backend Error',
-        'Backend failed to start. See backend.log in the app data folder.'
-      )
+      if (backendProc) {
+        backendProc.kill()
+        backendProc = null
+      }
+      logStream.end()
+      const logSnippet = readLastLines(logPath, 15)
+      const workaround = 'If this app was downloaded or copied, macOS may block the backend. In Terminal run:\n  xattr -cr "/Applications/MangoCT.app"'
+      const msg = [
+        `Log: ${logPath}`,
+        logSnippet ? `\nLast log lines:\n${logSnippet}` : '',
+        backendExitedBeforeReady && (exitCode != null || exitSignal) ? `\nBackend exited: code=${exitCode} signal=${exitSignal}` : '',
+        `\n\n${workaround}`,
+      ].join('')
+      await loadSplash('Backend failed to start. See backend.log in the app data folder.')
+      dialog.showErrorBox('Backend Error', msg)
     }
     const outDir = path.join(app.getAppPath(), 'frontend', 'out')
     const { server, port } = await startStaticServer(outDir)
     staticServer = server
     await mainWindow.loadURL(`http://127.0.0.1:${port}`)
   } else {
-    await mainWindow.loadURL('http://localhost:3000')
+    await loadSplash('Waiting for dev server…')
+    try {
+      await mainWindow.loadURL('http://localhost:3000')
+    } catch (err) {
+      await loadSplash('Dev server not running. Start it with: npm --prefix frontend run dev')
+    }
   }
 
   mainWindow.on('closed', () => {

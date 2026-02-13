@@ -22,8 +22,8 @@ export function generateDefaultColorMap(labelValues: number[]): Map<number, stri
     const colorMap = new Map<number, string>()
     const nonZeroLabels = labelValues.filter(label => label !== 0)
 
-    nonZeroLabels.forEach((label, index) => {
-        const color = generateDistinctColor(index, nonZeroLabels.length)
+    nonZeroLabels.forEach((label) => {
+        const color = generateDistinctColor(label - 1, nonZeroLabels.length)
         colorMap.set(label, color)
     })
 
@@ -75,8 +75,8 @@ export function createColorMapFromPalette(
     const colorMap = new Map<number, string>()
     const palette = COLOR_PALETTES[paletteName]
     const nonZeroLabels = labelValues.filter(label => label !== 0)
-    nonZeroLabels.forEach((label, index) => {
-        const color = palette[index % palette.length]
+    nonZeroLabels.forEach((label) => {
+        const color = palette[(label - 1) % palette.length]
         colorMap.set(label, color)
     })
 
@@ -92,4 +92,36 @@ export function extractLabelValues(imageData: ImageData): number[] {
     }
 
     return Array.from(labelSet).sort((a, b) => a - b)
+}
+
+export function buildLookupArray(colorMap: Map<number, string>, opacity: number): Uint8ClampedArray {
+    const alphaByte = Math.round(opacity * 255)
+    const out = new Uint8ClampedArray(256 * 4)
+    for (let label = 0; label <= 255; label++) {
+        const idx = label * 4
+        if (label === 0) {
+            out[idx] = 0
+            out[idx + 1] = 0
+            out[idx + 2] = 0
+            out[idx + 3] = 0
+        } else {
+            const hex = colorMap.get(label) ?? DEFAULT_LABEL_COLOR
+            const n = hex.replace(/^#/, '')
+            let r: number, g: number, b: number
+            if (n.length === 3) {
+                r = parseInt(n[0] + n[0], 16)
+                g = parseInt(n[1] + n[1], 16)
+                b = parseInt(n[2] + n[2], 16)
+            } else {
+                r = parseInt(n.slice(0, 2), 16)
+                g = parseInt(n.slice(2, 4), 16)
+                b = parseInt(n.slice(4, 6), 16)
+            }
+            out[idx] = r
+            out[idx + 1] = g
+            out[idx + 2] = b
+            out[idx + 3] = alphaByte
+        }
+    }
+    return out
 }

@@ -90,6 +90,10 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
                     role: s.role,
                     name: s.name,
                     allBackground: s.all_background ?? null,
+                    componentCount: s.component_count ?? null,
+                    multiLabel: s.multi_label ?? null,
+                    nonzeroLabelCount: s.nonzero_label_count ?? null,
+                    labelValues: s.label_values ?? null,
                     color:
                         segs[i]?.color ??
                         (s.role === 'pred'
@@ -105,6 +109,10 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
                             role: 'gt' as const,
                             name: 'Label',
                             allBackground: openRes.label_all_background ?? null,
+                            componentCount: null,
+                            multiLabel: null,
+                            nonzeroLabelCount: null,
+                            labelValues: null,
                             color: DEFAULT_LABEL_COLOR,
                             visible: true,
                             mode: 'filled' as const,
@@ -116,6 +124,10 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
                             role: 'pred' as const,
                             name: 'Prediction',
                             allBackground: null,
+                            componentCount: null,
+                            multiLabel: null,
+                            nonzeroLabelCount: null,
+                            labelValues: null,
                             color: DEFAULT_PRED_COLOR,
                             visible: true,
                             mode: 'filled' as const,

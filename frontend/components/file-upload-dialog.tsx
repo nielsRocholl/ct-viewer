@@ -5,6 +5,7 @@ import { useMutation } from '@tanstack/react-query'
 import { uploadVolume, createPair, addSegmentToPair, fetchFirstSliceWithMask } from '@/lib/api-client'
 import { VolumeMetadata, CreatePairResponse } from '@/lib/api-types'
 import { useViewerStore } from '@/lib/store'
+import { shallow } from 'zustand/shallow'
 import {
     Dialog,
     DialogContent,
@@ -113,18 +114,21 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
             const firstSeg = segs[0]
             const firstColor = firstSeg?.color ?? '#0072B2'
             const colorMap = new Map([[1, firstColor]])
+            const hasSeg = !!response.seg_metadata
             addPair({
                 pairId: response.pair_id,
                 ctVolumeId: response.ct_metadata.volume_id,
-                segVolumeId: response.seg_metadata.volume_id,
-                segVolumes: [{
-                    volumeId: response.seg_metadata.volume_id,
-                    colorMap,
-                    visible: true,
-                    mode: 'filled',
-                    name: firstSeg?.name,
-                    role: firstSeg?.role ?? undefined,
-                }],
+                ...(hasSeg && { segVolumeId: response.seg_metadata!.volume_id }),
+                segVolumes: hasSeg
+                    ? [{
+                        volumeId: response.seg_metadata!.volume_id,
+                        colorMap,
+                        visible: true,
+                        mode: 'filled',
+                        name: firstSeg?.name,
+                        role: firstSeg?.role ?? undefined,
+                    }]
+                    : [],
                 currentSliceIndex: 0,
                 orientation: 'axial',
                 windowLevel: 40,
@@ -136,16 +140,18 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                 overlayOpacity: 0.5,
                 colorMap,
             })
-            if (snapToMask) {
-                fetchFirstSliceWithMask(response.seg_metadata.volume_id, 'axial')
+            if (hasSeg && snapToMask) {
+                fetchFirstSliceWithMask(response.seg_metadata!.volume_id, 'axial')
                     .then((data) => updatePairSlice(response.pair_id, data.slice_index))
                     .catch(() => { })
             }
 
             toast.success('Pair created successfully', {
-                description: response.resampled
-                    ? 'Segmentation was resampled to match CT geometry'
-                    : 'Geometry validation passed',
+                description: !hasSeg
+                    ? 'CT volume added'
+                    : response.resampled
+                        ? 'Segmentation was resampled to match CT geometry'
+                        : 'Geometry validation passed',
             })
         },
         onError: (error: Error) => {
@@ -215,8 +221,12 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
     }
 
     const handleUpload = async () => {
-        if (!ctFile || segs.length === 0 || segs.some((s) => !s.file)) {
-            setErrorMessage('Please select a CT file and at least one segmentation mask')
+        if (!ctFile) {
+            setErrorMessage('Please select a CT file')
+            return
+        }
+        if (segs.length > 0 && segs.some((s) => !s.file)) {
+            setErrorMessage('Each added segmentation slot must have a file selected')
             return
         }
 
@@ -259,11 +269,10 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
             }
 
             setStage('creating-pair')
-            const firstSeg = segMetas[0]
             const pairResponse = await createPairMutation.mutateAsync({
                 ct_volume_id: ctMetadata.volume_id,
-                seg_volume_id: firstSeg.volume_id,
-                auto_resample: true, // Enable automatic resampling
+                ...(segMetas.length > 0 && { seg_volume_id: segMetas[0].volume_id }),
+                auto_resample: true,
             })
             bump(1)
 
@@ -308,7 +317,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
     }
 
     const isUploading = stage === 'uploading-ct' || stage === 'uploading-seg' || stage === 'creating-pair'
-    const canUpload = ctFile && segs.length > 0 && segs.every((s) => s.file) && !isUploading
+    const canUpload = ctFile && (segs.length === 0 || segs.every((s) => s.file)) && !isUploading
 
     return (
         <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -327,8 +336,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                 <DialogHeader>
                     <DialogTitle>Upload CT and Segmentation Pair</DialogTitle>
                     <DialogDescription>
-                        Select or drag and drop one CT volume and up to 10 segmentation masks. Supported formats: .nii,
-                        .nii.gz, .mha, .mhd
+                        Select a CT volume; optionally add up to 10 segmentation masks. Formats: .nii, .nii.gz, .mha, .mhd
                     </DialogDescription>
                 </DialogHeader>
 

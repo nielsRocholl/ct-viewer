@@ -15,7 +15,7 @@ export interface VolumeMetadata {
 
 export interface CreatePairRequest {
     ct_volume_id: string
-    seg_volume_id: string
+    seg_volume_id?: string
     auto_resample?: boolean
 }
 
@@ -24,14 +24,15 @@ export interface CreatePairResponse {
     compatible: boolean
     resampled: boolean
     ct_metadata: VolumeMetadata
-    seg_metadata: VolumeMetadata
+    seg_metadata?: VolumeMetadata
 }
 
 export interface PairMetadata {
     pair_id: string
     ct_metadata: VolumeMetadata
-    seg_metadata: VolumeMetadata
+    seg_metadata?: VolumeMetadata
     seg_metadatas?: VolumeMetadata[]
+    seg_stats?: SegmentationStats[]
 }
 
 export interface AddSegmentRequest {
@@ -131,6 +132,17 @@ export interface SegmentationVolumeInfo {
     role?: 'gt' | 'pred'
     name?: string
     all_background?: boolean | null
+    component_count?: number | null
+    multi_label?: boolean | null
+    nonzero_label_count?: number | null
+    label_values?: number[] | null
+}
+
+export interface SegmentationStats {
+    all_background: boolean
+    component_count: number
+    multi_label: boolean
+    nonzero_label_count: number
 }
 
 export interface GetCasesResponse {

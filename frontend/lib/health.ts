@@ -52,20 +52,6 @@ export function computePairHealth(
 ): { status: HealthStatus; details: HealthDetail[] } {
     const details: HealthDetail[] = []
 
-    if (!ctMetadata) {
-        details.push({
-            label: 'CT metadata',
-            status: 'red',
-            message: 'CT metadata missing',
-        })
-    } else {
-        details.push({
-            label: 'CT metadata',
-            status: 'green',
-            message: 'CT metadata loaded',
-        })
-    }
-
     if (ctSliceError) {
         details.push({
             label: 'CT slice',

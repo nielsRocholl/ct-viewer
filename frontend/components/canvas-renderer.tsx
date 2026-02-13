@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useCallback, useImperativeHandle, forwardRef, useMemo } from 'react'
+import { useEffect, useRef, useCallback, useImperativeHandle, forwardRef, useMemo, memo } from 'react'
 import { DEFAULT_LABEL_COLOR, DEFAULT_PRED_COLOR } from '@/lib/color-utils'
 
 const LOCAL_PATCH_RADIUS = 15
@@ -152,6 +152,28 @@ function buildLookup(colorMap: Map<number, string>, opacity: number): [number, n
     return out
 }
 
+function buildLookupArray(colorMap: Map<number, string>, opacity: number): Uint8ClampedArray {
+    const alphaByte = Math.round(opacity * 255)
+    const out = new Uint8ClampedArray(256 * 4)
+    for (let label = 0; label <= 255; label++) {
+        const idx = label * 4
+        if (label === 0) {
+            out[idx] = 0
+            out[idx + 1] = 0
+            out[idx + 2] = 0
+            out[idx + 3] = 0
+        } else {
+            const hex = colorMap.get(label) ?? DEFAULT_LABEL_COLOR
+            const [r, g, b] = hexToRgb(hex)
+            out[idx] = r
+            out[idx + 1] = g
+            out[idx + 2] = b
+            out[idx + 3] = alphaByte
+        }
+    }
+    return out
+}
+
 function colorMapKey(colorMap: Map<number, string>): string {
     let s = ''
     colorMap.forEach((v, k) => {
@@ -160,7 +182,7 @@ function colorMapKey(colorMap: Map<number, string>): string {
     return s
 }
 
-export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererProps>(function CanvasRenderer(
+const CanvasRendererImpl = forwardRef<CanvasRendererHandle, CanvasRendererProps>(function CanvasRenderer(
     {
         ctSliceUrl,
         segmentationSliceUrl,
@@ -191,6 +213,8 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
     const layerImageRefs = useRef<(HTMLImageElement | null)[]>([])
     const layerLoadIdRef = useRef<number[]>([])
     const layerCacheRef = useRef<{ key: string; canvas: HTMLCanvasElement }[]>([])
+    const renderRafRef = useRef<number | null>(null)
+    const lookupCacheRef = useRef<Map<string, Uint8ClampedArray>>(new Map())
 
     const overlayLayers = useMemo((): OverlayLayerSpec[] => {
         if (overlayLayersProp && overlayLayersProp.length > 0)
@@ -228,6 +252,23 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
         () => overlayLayers.map((l) => buildLookup(l.colorMap, l.opacity)),
         [overlayLayers]
     )
+    const layerLookupArrays = useMemo(() => {
+        return overlayLayers.map((l) => {
+            const key = `${colorMapKey(l.colorMap)}|${l.opacity}`
+            let cached = lookupCacheRef.current.get(key)
+            if (!cached) {
+                cached = buildLookupArray(l.colorMap, l.opacity)
+                lookupCacheRef.current.set(key, cached)
+                if (lookupCacheRef.current.size > 50) {
+                    const firstKey = lookupCacheRef.current.keys().next().value
+                    if (firstKey !== undefined) {
+                        lookupCacheRef.current.delete(firstKey)
+                    }
+                }
+            }
+            return cached
+        })
+    }, [overlayLayers])
     const layerKeys = useMemo(
         () =>
             overlayLayers.map((l) =>
@@ -261,7 +302,7 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
         [width, height, zoom, pan, windowLevel, windowWidth, getPatchCanvas]
     )
 
-    const renderCanvas = useCallback(() => {
+    const renderCanvasImpl = useCallback(() => {
         const canvas = canvasRef.current
         if (!canvas) return
 
@@ -327,7 +368,7 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
             if (!img) return
             const sw = img.naturalWidth || img.width
             const sh = img.naturalHeight || img.height
-            const lookup = layerLookups[idx] ?? layerLookups[0]
+            const lookupArray = layerLookupArrays[idx] ?? layerLookupArrays[0]
             const key = layerKeys[idx] ?? ''
             let cache = layerCacheRef.current[idx]
             if (!cache || cache.key !== key || cache.canvas.width !== sw || cache.canvas.height !== sh) {
@@ -341,11 +382,11 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
                 const d = data.data
                 for (let i = 0; i < d.length; i += 4) {
                     const label = d[i]
-                    const [r, g, b, a] = lookup[label] ?? lookup[0]
-                    d[i] = r
-                    d[i + 1] = g
-                    d[i + 2] = b
-                    d[i + 3] = a
+                    const labelIdx = label * 4
+                    d[i] = lookupArray[labelIdx]
+                    d[i + 1] = lookupArray[labelIdx + 1]
+                    d[i + 2] = lookupArray[labelIdx + 2]
+                    d[i + 3] = lookupArray[labelIdx + 3]
                 }
                 tCtx.putImageData(data, 0, 0)
                 cache = { key, canvas: temp }
@@ -357,7 +398,15 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
         if (anyCrisp) offscreenCtx.imageSmoothingEnabled = true
         offscreenCtx.restore()
         ctx.drawImage(offscreenCanvas, 0, 0)
-    }, [width, height, zoom, pan, overlayLayers, layerLookups, layerKeys])
+    }, [width, height, zoom, pan, overlayLayers, layerLookupArrays, layerKeys])
+
+    const renderCanvas = useCallback(() => {
+        if (renderRafRef.current !== null) return
+        renderRafRef.current = requestAnimationFrame(() => {
+            renderRafRef.current = null
+            renderCanvasImpl()
+        })
+    }, [renderCanvasImpl])
 
     // Load CT image
     useEffect(() => {
@@ -419,6 +468,12 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
     // Render canvas whenever parameters change
     useEffect(() => {
         renderCanvas()
+        return () => {
+            if (renderRafRef.current !== null) {
+                cancelAnimationFrame(renderRafRef.current)
+                renderRafRef.current = null
+            }
+        }
     }, [renderCanvas])
 
     return (
@@ -429,5 +484,48 @@ export const CanvasRenderer = forwardRef<CanvasRendererHandle, CanvasRendererPro
             className="border border-gray-300 dark:border-gray-700"
             style={{ imageRendering: 'pixelated' }}
         />
+    )
+})
+
+function colorMapEqual(a: Map<number, string>, b: Map<number, string>): boolean {
+    if (a === b) return true
+    if (a.size !== b.size) return false
+    for (const [k, v] of a) {
+        if (b.get(k) !== v) return false
+    }
+    return true
+}
+
+export const CanvasRenderer = memo(CanvasRendererImpl, (prev, next) => {
+    if (prev.overlayLayers && next.overlayLayers) {
+        if (prev.overlayLayers.length !== next.overlayLayers.length) return false
+        for (let i = 0; i < prev.overlayLayers.length; i++) {
+            const p = prev.overlayLayers[i]
+            const n = next.overlayLayers[i]
+            if (p.url !== n.url || p.opacity !== n.opacity || p.visible !== n.visible || !colorMapEqual(p.colorMap, n.colorMap)) {
+                return false
+            }
+        }
+    } else if (prev.overlayLayers !== next.overlayLayers) {
+        return false
+    }
+    return (
+        prev.ctSliceUrl === next.ctSliceUrl &&
+        prev.segmentationSliceUrl === next.segmentationSliceUrl &&
+        prev.overlayMode === next.overlayMode &&
+        prev.overlayOpacity === next.overlayOpacity &&
+        prev.overlayVisible === next.overlayVisible &&
+        (!prev.overlayLayers && colorMapEqual(prev.colorMap, next.colorMap)) &&
+        prev.predictionSliceUrl === next.predictionSliceUrl &&
+        prev.predictionOpacity === next.predictionOpacity &&
+        prev.predictionVisible === next.predictionVisible &&
+        prev.predictionColor === next.predictionColor &&
+        prev.zoom === next.zoom &&
+        prev.pan.x === next.pan.x &&
+        prev.pan.y === next.pan.y &&
+        prev.windowLevel === next.windowLevel &&
+        prev.windowWidth === next.windowWidth &&
+        prev.width === next.width &&
+        prev.height === next.height
     )
 })

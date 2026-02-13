@@ -1,6 +1,7 @@
 'use client'
 
 import { useViewerStore, getPairSegVolumes } from '@/lib/store'
+import { shallow } from 'zustand/shallow'
 import { usePairMetadata, useVolumeMetadatas } from '@/lib/api-hooks'
 import { Button } from './ui/button'
 import { Slider } from './ui/slider'
@@ -45,7 +46,7 @@ function clamp(x: number, lo: number, hi: number): number {
 }
 
 export function GlobalControls() {
-    const pairs = useViewerStore((state) => state.pairs)
+    const pairArray = useViewerStore((state) => Array.from(state.pairs.values()), shallow)
     const synchronized = useViewerStore((state) => state.synchronized)
     const syncMode = useViewerStore((state) => state.syncMode)
     const syncRefPairId = useViewerStore((state) => state.syncRefPairId)
@@ -80,8 +81,6 @@ export function GlobalControls() {
     const [syncInfoOpen, setSyncInfoOpen] = useState(false)
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const rangeCacheRef = useRef<{ key: string; range: PhysicalRange } | null>(null)
-
-    const pairArray = Array.from(pairs.values())
     const hasPairs = pairArray.length > 0
     const firstPair = pairArray[0] ?? null
     const orientation = firstPair?.orientation ?? 'axial'
@@ -462,7 +461,7 @@ export function GlobalControls() {
                                 trigger={
                                     <Button className="w-full gap-2" variant="outline">
                                         <Upload className="h-4 w-4" />
-                                        Upload Pair
+                                        Upload
                                     </Button>
                                 }
                             />
@@ -489,9 +488,8 @@ export function GlobalControls() {
                                         <div>
                                             <div className="font-medium text-foreground">What happens</div>
                                             <ul className="list-disc pl-5 space-y-1">
-                                                <li>Upload one CT volume and up to 10 segmentation masks.</li>
-                                                <li>The CT and first mask create the pair.</li>
-                                                <li>Additional masks are added to the same pair automatically.</li>
+                                                <li>Upload one CT volume; optionally add up to 10 segmentation masks.</li>
+                                                <li>Masks can be added later from the panel.</li>
                                             </ul>
                                         </div>
                                         <div>

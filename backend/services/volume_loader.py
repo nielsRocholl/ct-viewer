@@ -44,6 +44,7 @@ class VolumeLoaderService:
     def __init__(self):
         self._volumes: Dict[str, sitk.Image] = {}
         self._metadata: Dict[str, VolumeMetadata] = {}
+        self._label_stats: Dict[str, dict] = {}
         logger.info("VolumeLoaderService initialized")
     
     async def load_volume(self, file_path: str) -> VolumeMetadata:
@@ -182,6 +183,8 @@ class VolumeLoaderService:
         
         if volume_id in self._metadata:
             del self._metadata[volume_id]
+        if volume_id in self._label_stats:
+            del self._label_stats[volume_id]
 
     def replace_volume(self, volume_id: str, volume: sitk.Image) -> None:
         """Replace an existing cached volume and update its metadata."""
@@ -192,6 +195,8 @@ class VolumeLoaderService:
                 f"Volume must be 3D, got {volume.GetDimension()}D"
             )
         self._volumes[volume_id] = volume
+        if volume_id in self._label_stats:
+            del self._label_stats[volume_id]
         meta = self._metadata[volume_id]
         dims = volume.GetSize()
         spacing = volume.GetSpacing()
@@ -216,6 +221,29 @@ class VolumeLoaderService:
             size_bytes=size_bytes,
             loaded_at=meta.loaded_at,
         )
+
+    def get_label_stats(self, volume_id: str) -> dict:
+        if volume_id in self._label_stats:
+            return self._label_stats[volume_id]
+        seg = self.get_volume(volume_id)
+        mask = seg > 0
+        cc = sitk.ConnectedComponent(mask)
+        relabel = sitk.RelabelComponentImageFilter()
+        relabel.Execute(cc)
+        component_count = int(relabel.GetNumberOfObjects())
+        stats = sitk.LabelStatisticsImageFilter()
+        stats.Execute(seg, seg)
+        labels = [int(l) for l in stats.GetLabels() if int(l) != 0]
+        nonzero_label_count = len(labels)
+        out = {
+            "all_background": component_count == 0,
+            "component_count": component_count,
+            "multi_label": nonzero_label_count > 1,
+            "nonzero_label_count": nonzero_label_count,
+            "label_values": sorted(labels),
+        }
+        self._label_stats[volume_id] = out
+        return out
     
     def list_volumes(self) -> Dict[str, VolumeMetadata]:
         """Get all loaded volume metadata

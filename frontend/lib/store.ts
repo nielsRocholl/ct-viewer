@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { shallow } from 'zustand/shallow'
 import { generateDistinctColor } from '@/lib/color-utils'
 
 export type ViewOrientation = 'axial' | 'sagittal' | 'coronal'
@@ -58,6 +59,10 @@ export interface DatasetCaseState {
         role?: 'gt' | 'pred'
         name?: string
         allBackground?: boolean | null
+        componentCount?: number | null
+        multiLabel?: boolean | null
+        nonzeroLabelCount?: number | null
+        labelValues?: number[] | null
         color?: string
         visible?: boolean
         mode?: 'filled' | 'boundary'

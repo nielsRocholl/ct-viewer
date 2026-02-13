@@ -47,6 +47,17 @@ import { WINDOW_PRESETS } from '@/lib/window-presets'
 const WINDOW_ROI_RADIUS_MM = 20
 const WINDOW_SMOOTH_NEW = 0.7
 
+const healthExplain = (label: string): string => {
+    if (label.startsWith('Mask ')) return 'Mask metadata loaded and geometry matches CT.'
+    if (label === 'Mask content') return 'Mask has foreground voxels.'
+    if (label === 'CT slice') return 'CT slices are accessible.'
+    if (label === 'CT dimensions') return 'All CT dimensions are positive.'
+    if (label === 'CT spacing') return 'All spacing values are positive.'
+    if (label === 'CT anisotropy') return 'Max spacing / min spacing ratio is within range.'
+    if (label === 'CT orientation') return 'Direction matrix is orthonormal.'
+    return 'Check status.'
+}
+
 export interface ViewerPanelProps {
     pairId: string
 }
@@ -106,19 +117,23 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         const el = canvasContainerRef.current
         if (!el) return
         let rafId = 0
-        const MIN_DELTA = 8
+        let debounceTimer: ReturnType<typeof setTimeout> | null = null
+        const MIN_DELTA = 16
         const ro = new ResizeObserver(() => {
-            if (rafId) cancelAnimationFrame(rafId)
-            rafId = requestAnimationFrame(() => {
-                rafId = 0
-                const w = Math.max(1, (el.clientWidth >> 1) << 1)
-                const h = Math.max(1, (el.clientHeight >> 1) << 1)
-                const last = lastSizeRef.current
-                if (Math.abs(w - last.width) >= MIN_DELTA || Math.abs(h - last.height) >= MIN_DELTA) {
-                    lastSizeRef.current = { width: w, height: h }
-                    setCanvasSize({ width: w, height: h })
-                }
-            })
+            if (debounceTimer) clearTimeout(debounceTimer)
+            debounceTimer = setTimeout(() => {
+                if (rafId) cancelAnimationFrame(rafId)
+                rafId = requestAnimationFrame(() => {
+                    rafId = 0
+                    const w = Math.max(1, (el.clientWidth >> 1) << 1)
+                    const h = Math.max(1, (el.clientHeight >> 1) << 1)
+                    const last = lastSizeRef.current
+                    if (Math.abs(w - last.width) >= MIN_DELTA || Math.abs(h - last.height) >= MIN_DELTA) {
+                        lastSizeRef.current = { width: w, height: h }
+                        setCanvasSize({ width: w, height: h })
+                    }
+                })
+            }, 100)
         })
         ro.observe(el)
         const w = Math.max(1, (el.clientWidth >> 1) << 1)
@@ -129,6 +144,7 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         }
         return () => {
             if (rafId) cancelAnimationFrame(rafId)
+            if (debounceTimer) clearTimeout(debounceTimer)
             ro.disconnect()
         }
     }, [])
@@ -690,6 +706,15 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
             ),
         [health.details]
     )
+    const labelStats = useMemo(
+        () =>
+            segVolumes.map((seg, i) => {
+                const name = seg.name ?? (seg.role === 'pred' ? 'Prediction' : seg.role === 'gt' ? 'Label' : `Segmentation ${i + 1}`)
+                const stats = pairMetadata?.seg_stats?.[i]
+                return { name, stats }
+            }),
+        [segVolumes, pairMetadata?.seg_stats]
+    )
 
     if (!pair) {
         return (
@@ -724,12 +749,44 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                                     <VolumeInfoCard
                                         volumes={[
                                             { title: 'Image', meta: pairMetadata.ct_metadata },
-                                            { title: 'Label', meta: pairMetadata.seg_metadata },
+                                            ...(pairMetadata.seg_metadata
+                                                ? [{ title: 'Label', meta: pairMetadata.seg_metadata }]
+                                                : []),
                                         ]}
                                         onClose={() => setVolumeInfoOpen(false)}
                                     />
                                 </PopoverContent>
                             </Popover>
+                            {segVolumes.length > 0 && (
+                                <Popover>
+                                    <PopoverTrigger asChild>
+                                        <Button variant="outline" size="sm" className="text-xs">
+                                            Segmentation Info
+                                        </Button>
+                                    </PopoverTrigger>
+                                    <PopoverContent
+                                        className="w-[var(--radix-popover-trigger-width)] max-w-[90vw] min-w-[260px]"
+                                        align="end"
+                                    >
+                                        <div className="space-y-3 text-xs">
+                                            <div className="text-sm font-medium text-foreground">Segmentation Info</div>
+                                            <div className="space-y-2 rounded-md border bg-muted/30 p-2">
+                                                {labelStats.map((s, i) => (
+                                                    <div key={`${s.name}-${i}`} className="space-y-1">
+                                                        <div className="text-foreground">{s.name}</div>
+                                                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+                                                            <div>Foreground: {s.stats ? (s.stats.all_background ? 'No' : 'Yes') : 'Unknown'}</div>
+                                                            <div>Components: {s.stats ? s.stats.component_count : '—'}</div>
+                                                            <div>Multi‑label: {s.stats ? (s.stats.multi_label ? 'Yes' : 'No') : '—'}</div>
+                                                            <div>Labels: {s.stats ? s.stats.nonzero_label_count : '—'}</div>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </PopoverContent>
+                                </Popover>
+                            )}
                             <Popover>
                                 <PopoverTrigger asChild>
                                     <button type="button" aria-label="Health status">
@@ -759,24 +816,33 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                                                 </Badge>
                                             </div>
                                         </div>
-                                        <div className="space-y-2 rounded-md border bg-muted/30 p-2">
-                                            {health.details.map((d, i) => (
-                                                <div key={`${d.label}-${i}`} className="flex items-start justify-between gap-3">
-                                                    <div className="space-y-0.5">
-                                                        <div className="text-foreground">{d.label}</div>
-                                                        <div className="text-muted-foreground">{d.message}</div>
-                                                    </div>
-                                                    <Badge
-                                                        className={`h-4 w-4 rounded-full p-0 ${d.status === 'red'
-                                                            ? 'bg-red-500 text-white'
-                                                            : d.status === 'orange'
-                                                                ? 'bg-amber-500 text-black'
-                                                                : 'bg-emerald-500 text-white'
-                                                            }`}
-                                                    />
+                                                <div className="space-y-2 rounded-md border bg-muted/30 p-2">
+                                                    {health.details.map((d, i) => (
+                                                        <div key={`${d.label}-${i}`} className="flex items-start justify-between gap-3">
+                                                            <div className="space-y-0.5">
+                                                                <div className="text-foreground">{d.label}</div>
+                                                                <div className="text-muted-foreground">{d.message}</div>
+                                                            </div>
+                                                            <Popover>
+                                                                <PopoverTrigger asChild>
+                                                                    <button type="button" aria-label={`${d.label} explanation`}>
+                                                                        <Badge
+                                                                            className={`h-4 w-4 rounded-full p-0 ${d.status === 'red'
+                                                                                ? 'bg-red-500 text-white'
+                                                                                : d.status === 'orange'
+                                                                                    ? 'bg-amber-500 text-black'
+                                                                                    : 'bg-emerald-500 text-white'
+                                                                                }`}
+                                                                        />
+                                                                    </button>
+                                                                </PopoverTrigger>
+                                                                <PopoverContent className="max-w-[220px]" align="end">
+                                                                    <div className="text-xs text-foreground">{healthExplain(d.label)}</div>
+                                                                </PopoverContent>
+                                                            </Popover>
+                                                        </div>
+                                                    ))}
                                                 </div>
-                                            ))}
-                                        </div>
                                     </div>
                                 </PopoverContent>
                             </Popover>

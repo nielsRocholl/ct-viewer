@@ -1,6 +1,7 @@
 'use client'
 
 import { useViewerStore } from '@/lib/store'
+import { shallow } from 'zustand/shallow'
 import { ViewerPanel } from './viewer-panel'
 import { DatasetViewerPanel, DatasetNav } from './dataset-viewer-panel'
 import { Button } from './ui/button'
@@ -18,13 +19,11 @@ const GRID_COLS_CLASS: Record<number, string> = {
 }
 
 export function ViewerGrid() {
-    const pairs = useViewerStore((state) => state.pairs)
+    const pairArray = useViewerStore((state) => Array.from(state.pairs.values()), shallow)
     const removePair = useViewerStore((state) => state.removePair)
     const gridColumns = useViewerStore((state) => state.gridColumns)
     const viewMode = useViewerStore((state) => state.viewMode)
     const datasetCase = useViewerStore((state) => state.datasetCase)
-
-    const pairArray = Array.from(pairs.values())
     const canAddMore = pairArray.length < MAX_PAIRS
     const gridColsClass = GRID_COLS_CLASS[Math.min(4, Math.max(1, gridColumns))] ?? 'md:grid-cols-2'
 
