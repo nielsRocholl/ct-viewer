@@ -1,8 +1,15 @@
 'use client'
 
 import { useState, useRef, useEffect, DragEvent, ChangeEvent } from 'react'
-import { useMutation } from '@tanstack/react-query'
-import { uploadVolume, createPair, addSegmentToPair, fetchFirstSliceWithMask } from '@/lib/api-client'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { queryKeys } from '@/lib/api-hooks'
+import {
+    uploadVolume,
+    createPair,
+    addSegmentToPair,
+    fetchFirstSliceWithMask,
+    getPairMetadata,
+} from '@/lib/api-client'
 import { VolumeMetadata, CreatePairResponse } from '@/lib/api-types'
 import { useViewerStore } from '@/lib/store'
 import { shallow } from 'zustand/shallow'
@@ -23,9 +30,15 @@ import { Card, CardContent, CardHeader } from './ui/card'
 import { Input } from './ui/input'
 import { Upload, FileUp, CheckCircle2, XCircle, AlertCircle, Plus, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { toast } from 'sonner'
+import {
+    createColorMapFromPalette,
+    generateDistinctColor,
+} from '@/lib/color-utils'
 
 interface FileUploadDialogProps {
     trigger?: React.ReactNode
+    open?: boolean
+    onOpenChange?: (open: boolean) => void
 }
 
 type UploadStage = 'idle' | 'uploading-ct' | 'uploading-seg' | 'creating-pair' | 'success' | 'error'
@@ -38,8 +51,10 @@ const ordinal = (n: number) => {
     return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`
 }
 
-export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
-    const [open, setOpen] = useState(false)
+export function FileUploadDialog({ trigger, open: openProp, onOpenChange }: FileUploadDialogProps) {
+    const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
+    const controlled = openProp !== undefined
+    const open = controlled ? openProp : uncontrolledOpen
     const [ctFile, setCtFile] = useState<File | null>(null)
     const [segs, setSegs] = useState<SegEntry[]>([])
     const [stage, setStage] = useState<UploadStage>('idle')
@@ -51,6 +66,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
 
     const ctInputRef = useRef<HTMLInputElement>(null)
     const segInputRefs = useRef<(HTMLInputElement | null)[]>([])
+    const addMultiSegInputRef = useRef<HTMLInputElement>(null)
     const dialogContentRef = useRef<HTMLDivElement>(null)
     const pendingPickRef = useRef<number | null>(null)
 
@@ -75,6 +91,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
         requestAnimationFrame(() => el.click())
     }, [expandedSeg, segs.length])
 
+    const queryClient = useQueryClient()
     const addPair = useViewerStore((state) => state.addPair)
     const addSegToPairStore = useViewerStore((state) => state.addSegToPair)
     const updatePairSlice = useViewerStore((state) => state.updatePairSlice)
@@ -107,14 +124,26 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
 
     const createPairMutation = useMutation({
         mutationFn: createPair,
-        onSuccess: (response) => {
+        onSuccess: async (response) => {
             setUploadProgress(100)
             setValidationResult(response)
             setStage('success')
             const firstSeg = segs[0]
-            const firstColor = firstSeg?.color ?? '#0072B2'
-            const colorMap = new Map([[1, firstColor]])
+            const firstColor = firstSeg?.color ?? generateDistinctColor(0)
+            let colorMap = new Map<number, string>([[1, firstColor]])
             const hasSeg = !!response.seg_metadata
+            if (hasSeg) {
+                try {
+                    const meta = await getPairMetadata(response.pair_id)
+                    const stats = meta.seg_stats?.[0]
+                    const labelValues = stats?.label_values ?? []
+                    if (labelValues.length > 1) {
+                        colorMap = createColorMapFromPalette(labelValues, 'colorblind')
+                    }
+                } catch {
+                    // keep default single-color map
+                }
+            }
             addPair({
                 pairId: response.pair_id,
                 ctVolumeId: response.ct_metadata.volume_id,
@@ -174,13 +203,37 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
         const newIndex = segs.length
         pendingPickRef.current = newIndex
         setSegs((prev) => {
-            if (prev.length >= 10) return prev
+            if (prev.length >= 20) return prev
             return [
                 ...prev,
-                { file: null, name: `Segmentation ${prev.length + 1}`, color: '#0072B2', role: null },
+                {
+                    file: null,
+                    name: `Segmentation ${prev.length + 1}`,
+                    color: generateDistinctColor(prev.length),
+                    role: null,
+                },
             ]
         })
         setExpandedSeg(newIndex)
+        requestAnimationFrame(scrollBottom)
+    }
+
+    const handleAddMultiMasks = (e: ChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(e.target.files ?? [])
+        e.target.value = ''
+        if (files.length === 0) return
+        const toAdd = Math.min(files.length, 20 - segs.length)
+        if (toAdd <= 0) return
+        setSegs((prev) => [
+            ...prev,
+            ...files.slice(0, toAdd).map((file, i) => ({
+                file,
+                name: `Segmentation ${prev.length + i + 1}`,
+                color: generateDistinctColor(prev.length + i),
+                role: null as SegRole,
+            })),
+        ])
+        setExpandedSeg(segs.length + toAdd - 1)
         requestAnimationFrame(scrollBottom)
     }
 
@@ -237,8 +290,8 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
             })
             return
         }
-        if (segs.length > 10) {
-            setErrorMessage('Maximum of 10 masks allowed per pair')
+        if (segs.length > 20) {
+            setErrorMessage('Maximum of 20 masks allowed per pair')
             return
         }
 
@@ -277,21 +330,28 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
             bump(1)
 
             for (let i = 1; i < segMetas.length; i += 1) {
-                await addSegmentToPair(pairResponse.pair_id, {
+                const updated = await addSegmentToPair(pairResponse.pair_id, {
                     seg_volume_id: segMetas[i].volume_id,
                     auto_resample: true,
                 })
                 const seg = segs[i]
+                const lastStats = updated.seg_stats?.[updated.seg_stats.length - 1]
+                const labelValues = lastStats?.label_values ?? []
+                const colorMap =
+                    labelValues.length > 1
+                        ? createColorMapFromPalette(labelValues, 'colorblind', i)
+                        : new Map([[1, seg.color ?? generateDistinctColor(i)]])
                 addSegToPairStore(
                     pairResponse.pair_id,
                     segMetas[i].volume_id,
-                    new Map([[1, seg.color]]),
+                    colorMap,
                     seg.name,
                     seg.role ?? undefined
                 )
                 bump(1)
             }
 
+            queryClient.invalidateQueries({ queryKey: queryKeys.pair(pairResponse.pair_id) })
         } catch (error) {
             console.error('Upload failed:', error)
         }
@@ -310,25 +370,33 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
     }
 
     const handleOpenChange = (newOpen: boolean) => {
-        setOpen(newOpen)
-        if (!newOpen && stage === 'success') {
-            setTimeout(handleReset, 300)
-        }
+        if (!controlled) setUncontrolledOpen(newOpen)
+        onOpenChange?.(newOpen)
     }
+
+    const wasOpen = useRef(false)
+    useEffect(() => {
+        if (open && !wasOpen.current) handleReset()
+        wasOpen.current = open
+    }, [open])
 
     const isUploading = stage === 'uploading-ct' || stage === 'uploading-seg' || stage === 'creating-pair'
     const canUpload = ctFile && (segs.length === 0 || segs.every((s) => s.file)) && !isUploading
 
+    const showTrigger = trigger != null || !controlled
+
     return (
         <Dialog open={open} onOpenChange={handleOpenChange}>
-            <DialogTrigger asChild>
-                {trigger || (
-                    <Button className="gap-2">
-                        <Upload className="h-4 w-4" />
-                        Upload
-                    </Button>
-                )}
-            </DialogTrigger>
+            {showTrigger ? (
+                <DialogTrigger asChild>
+                    {trigger ?? (
+                        <Button className="gap-2">
+                            <Upload className="h-4 w-4" />
+                            Upload
+                        </Button>
+                    )}
+                </DialogTrigger>
+            ) : null}
             <DialogContent
                 ref={dialogContentRef}
                 className="sm:max-w-[600px] max-h-[85vh] overflow-y-auto overflow-x-hidden min-w-0"
@@ -336,7 +404,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                 <DialogHeader>
                     <DialogTitle>Upload CT and Segmentation Pair</DialogTitle>
                     <DialogDescription>
-                        Select a CT volume; optionally add up to 10 segmentation masks. Formats: .nii, .nii.gz, .mha, .mhd
+                        Select a CT volume; optionally add up to 20 segmentation masks. Formats: .nii, .nii.gz, .mha, .mhd
                     </DialogDescription>
                 </DialogHeader>
 
@@ -396,7 +464,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                     <div className="space-y-2 min-w-0 overflow-hidden">
                         <Label className="text-sm font-medium">Segmentation masks</Label>
                         <p className="text-xs text-muted-foreground">
-                            Add up to 10 masks. Choose file, optional name and color, and role (GT or Pred).
+                            Add up to 20 masks. Choose file(s), optional name and color, and role (GT or Pred).
                         </p>
                         <div className="space-y-2 min-w-0">
                             {segs.map((seg, idx) => (
@@ -461,9 +529,30 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                                                         id={`seg-file-${idx}`}
                                                         type="file"
                                                         accept=".nii,.gz,.mha,.mhd"
-                                                        onChange={(e) =>
-                                                            updateSeg(idx, { file: e.target.files?.[0] ?? null })
-                                                        }
+                                                        multiple
+                                                        onChange={(e) => {
+                                                            const files = Array.from(e.target.files ?? [])
+                                                            e.target.value = ''
+                                                            if (files.length === 0) return
+                                                            const toAdd = Math.min(files.length, 20 - segs.length)
+                                                            if (toAdd <= 0) return
+                                                            setSegs((prev) => {
+                                                                const next = [...prev]
+                                                                next[idx] = { ...next[idx], file: files[0] }
+                                                                for (let i = 1; i < toAdd; i++) {
+                                                                    const slot = next.length
+                                                                    next.push({
+                                                                        file: files[i],
+                                                                        name: `Segmentation ${slot + 1}`,
+                                                                        color: generateDistinctColor(slot),
+                                                                        role: null,
+                                                                    })
+                                                                }
+                                                                return next
+                                                            })
+                                                            setExpandedSeg(toAdd === 1 ? idx : segs.length + toAdd - 2)
+                                                            requestAnimationFrame(scrollBottom)
+                                                        }}
                                                         className="hidden"
                                                         disabled={isUploading}
                                                     />
@@ -540,20 +629,31 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                                 </Card>
                             ))}
                         </div>
-                        {segs.length < 10 && (
-                            <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="gap-2 w-full"
-                                onClick={addSegEntry}
-                                disabled={isUploading}
-                            >
-                                <Plus className="h-4 w-4" />
-                                {segs.length === 0
-                                    ? 'Add segmentation mask'
-                                    : `Add ${ordinal(segs.length + 1)} segmentation`}
-                            </Button>
+                        {segs.length < 20 && (
+                            <>
+                                <input
+                                    ref={addMultiSegInputRef}
+                                    type="file"
+                                    accept=".nii,.gz,.mha,.mhd"
+                                    multiple
+                                    onChange={handleAddMultiMasks}
+                                    className="hidden"
+                                    disabled={isUploading}
+                                />
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="gap-2 w-full"
+                                    onClick={() => addMultiSegInputRef.current?.click()}
+                                    disabled={isUploading}
+                                >
+                                    <Plus className="h-4 w-4" />
+                                    {segs.length === 0
+                                        ? 'Add masks (select one or more files)'
+                                        : `Add more masks (${20 - segs.length} slots left)`}
+                                </Button>
+                            </>
                         )}
                     </div>
 
@@ -616,7 +716,7 @@ export function FileUploadDialog({ trigger }: FileUploadDialogProps) {
                             <Button variant="outline" onClick={handleReset}>
                                 Upload Another
                             </Button>
-                            <Button onClick={() => setOpen(false)}>Close</Button>
+                            <Button onClick={() => handleOpenChange(false)}>Close</Button>
                         </>
                     ) : (
                         <>

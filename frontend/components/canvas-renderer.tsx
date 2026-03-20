@@ -50,6 +50,8 @@ export interface CanvasRendererProps {
     width?: number
     height?: number
     onSliceDimensions?: (dims: { width: number; height: number }) => void
+    /** Marker position in image pixel coords; shown for a few seconds after go-to */
+    markerPosition?: { x: number; y: number } | null
 }
 
 function toRaw(P: number, windowLevel: number, windowWidth: number): number {
@@ -174,6 +176,20 @@ function buildLookupArray(colorMap: Map<number, string>, opacity: number): Uint8
     return out
 }
 
+/** RGBA lookup as little-endian uint32 for one store per pixel (ImageData layout). */
+function lookupArrayToPackedU32(lookupArray: Uint8ClampedArray): Uint32Array {
+    const lut = new Uint32Array(256)
+    for (let l = 0; l < 256; l++) {
+        const i = l * 4
+        lut[l] =
+            lookupArray[i] |
+            (lookupArray[i + 1] << 8) |
+            (lookupArray[i + 2] << 16) |
+            (lookupArray[i + 3] << 24)
+    }
+    return lut
+}
+
 function colorMapKey(colorMap: Map<number, string>): string {
     let s = ''
     colorMap.forEach((v, k) => {
@@ -202,6 +218,7 @@ const CanvasRendererImpl = forwardRef<CanvasRendererHandle, CanvasRendererProps>
         width = 512,
         height = 512,
         onSliceDimensions,
+        markerPosition,
     },
     ref
 ) {
@@ -269,6 +286,10 @@ const CanvasRendererImpl = forwardRef<CanvasRendererHandle, CanvasRendererProps>
             return cached
         })
     }, [overlayLayers])
+    const layerLookupPacked = useMemo(
+        () => layerLookupArrays.map((a) => lookupArrayToPackedU32(a)),
+        [layerLookupArrays]
+    )
     const layerKeys = useMemo(
         () =>
             overlayLayers.map((l) =>
@@ -368,7 +389,7 @@ const CanvasRendererImpl = forwardRef<CanvasRendererHandle, CanvasRendererProps>
             if (!img) return
             const sw = img.naturalWidth || img.width
             const sh = img.naturalHeight || img.height
-            const lookupArray = layerLookupArrays[idx] ?? layerLookupArrays[0]
+            const lut32 = layerLookupPacked[idx] ?? layerLookupPacked[0]
             const key = layerKeys[idx] ?? ''
             let cache = layerCacheRef.current[idx]
             if (!cache || cache.key !== key || cache.canvas.width !== sw || cache.canvas.height !== sh) {
@@ -380,13 +401,9 @@ const CanvasRendererImpl = forwardRef<CanvasRendererHandle, CanvasRendererProps>
                 tCtx.drawImage(img, 0, 0)
                 const data = tCtx.getImageData(0, 0, sw, sh)
                 const d = data.data
-                for (let i = 0; i < d.length; i += 4) {
-                    const label = d[i]
-                    const labelIdx = label * 4
-                    d[i] = lookupArray[labelIdx]
-                    d[i + 1] = lookupArray[labelIdx + 1]
-                    d[i + 2] = lookupArray[labelIdx + 2]
-                    d[i + 3] = lookupArray[labelIdx + 3]
+                const u32 = new Uint32Array(d.buffer, d.byteOffset, d.length >> 2)
+                for (let p = 0; p < u32.length; p++) {
+                    u32[p] = lut32[u32[p] & 0xff]
                 }
                 tCtx.putImageData(data, 0, 0)
                 cache = { key, canvas: temp }
@@ -396,12 +413,33 @@ const CanvasRendererImpl = forwardRef<CanvasRendererHandle, CanvasRendererProps>
         })
 
         if (anyCrisp) offscreenCtx.imageSmoothingEnabled = true
+
+        if (markerPosition && refImg) {
+            const sw = refImg.naturalWidth || refImg.width
+            const sh = refImg.naturalHeight || refImg.height
+            const mx = drawX + (markerPosition.x / sw) * drawW
+            const my = drawY + (markerPosition.y / sh) * drawH
+            offscreenCtx.strokeStyle = '#00ff00'
+            offscreenCtx.lineWidth = 2
+            offscreenCtx.beginPath()
+            offscreenCtx.arc(mx, my, 12, 0, 2 * Math.PI)
+            offscreenCtx.stroke()
+            offscreenCtx.beginPath()
+            offscreenCtx.moveTo(mx - 16, my)
+            offscreenCtx.lineTo(mx + 16, my)
+            offscreenCtx.moveTo(mx, my - 16)
+            offscreenCtx.lineTo(mx, my + 16)
+            offscreenCtx.stroke()
+        }
+
         offscreenCtx.restore()
         ctx.drawImage(offscreenCanvas, 0, 0)
-    }, [width, height, zoom, pan, overlayLayers, layerLookupArrays, layerKeys])
+    }, [width, height, zoom, pan, overlayLayers, layerLookupPacked, layerKeys, markerPosition])
 
     const renderCanvas = useCallback(() => {
-        if (renderRafRef.current !== null) return
+        if (renderRafRef.current !== null) {
+            cancelAnimationFrame(renderRafRef.current)
+        }
         renderRafRef.current = requestAnimationFrame(() => {
             renderRafRef.current = null
             renderCanvasImpl()
@@ -526,6 +564,8 @@ export const CanvasRenderer = memo(CanvasRendererImpl, (prev, next) => {
         prev.windowLevel === next.windowLevel &&
         prev.windowWidth === next.windowWidth &&
         prev.width === next.width &&
-        prev.height === next.height
+        prev.height === next.height &&
+        prev.markerPosition?.x === next.markerPosition?.x &&
+        prev.markerPosition?.y === next.markerPosition?.y
     )
 })

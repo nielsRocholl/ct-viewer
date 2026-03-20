@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { shallow } from 'zustand/shallow'
 import { generateDistinctColor } from '@/lib/color-utils'
+import type { DatasetStatisticsComputed } from '@/lib/dataset-stats-aggregate'
 
 export type ViewOrientation = 'axial' | 'sagittal' | 'coronal'
 
@@ -64,6 +65,8 @@ export interface DatasetCaseState {
         nonzeroLabelCount?: number | null
         labelValues?: number[] | null
         color?: string
+        /** Per-label colors for multi-label segmentations (label value -> hex) */
+        colorMap?: Record<string, string>
         visible?: boolean
         mode?: 'filled' | 'boundary'
     }[]
@@ -80,8 +83,9 @@ interface ViewerState {
     syncMode: 'overlap' | 'union' | 'reference'
     syncRefPairId: string | null
     gridColumns: number
-    viewMode: 'pairs' | 'dataset'
+    viewMode: 'pairs' | 'dataset' | 'datasetStats'
     datasetCase: DatasetCaseState | null
+    datasetLesionStats: DatasetStatisticsComputed | null
     cleanDatasetMode: boolean
 
     // Actions
@@ -97,6 +101,8 @@ interface ViewerState {
     addSegToPair: (pairId: string, volumeId: string, colorMap?: Map<number, string>, name?: string, role?: 'gt' | 'pred') => void
     removeSegFromPair: (pairId: string, index: number) => void
     updateSegColorMap: (pairId: string, index: number, colorMap: Map<number, string>) => void
+    updateSegName: (pairId: string, index: number, name: string) => void
+    updateSegRole: (pairId: string, index: number, role: 'gt' | 'pred' | undefined) => void
     updateSegVisible: (pairId: string, index: number, visible: boolean) => void
     updateSegMode: (pairId: string, index: number, mode: 'filled' | 'boundary') => void
     resetPairView: (pairId: string) => void
@@ -108,8 +114,9 @@ interface ViewerState {
     setSyncRefPairId: (pairId: string | null) => void
     setGridColumns: (n: number) => void
     updateAllPairsSlice: (sliceIndices: Map<string, number>) => void
-    setViewMode: (mode: 'pairs' | 'dataset') => void
+    setViewMode: (mode: 'pairs' | 'dataset' | 'datasetStats') => void
     setDatasetCase: (caseState: DatasetCaseState | null) => void
+    setDatasetLesionStats: (stats: DatasetStatisticsComputed | null) => void
     setCleanDatasetMode: (v: boolean) => void
     setPairControlsExpanded: (pairId: string, expanded: boolean) => void
     setAllPairsControlsExpanded: (expanded: boolean) => void
@@ -133,6 +140,7 @@ export const useViewerStore = create<ViewerState>((set) => ({
     gridColumns: 2,
     viewMode: 'pairs',
     datasetCase: null,
+    datasetLesionStats: null,
     cleanDatasetMode: false,
 
     addPair: (pair) =>
@@ -276,6 +284,32 @@ export const useViewerStore = create<ViewerState>((set) => ({
             return { pairs: newPairs }
         }),
 
+    updateSegName: (pairId, index, name) =>
+        set((state) => {
+            const pair = state.pairs.get(pairId)
+            if (!pair) return state
+            const segs = getPairSegVolumes(pair)
+            if (index < 0 || index >= segs.length) return state
+            const newPairs = new Map(state.pairs)
+            const newSegs = [...segs]
+            newSegs[index] = { ...newSegs[index], name: name || undefined }
+            newPairs.set(pairId, { ...pair, segVolumes: newSegs })
+            return { pairs: newPairs }
+        }),
+
+    updateSegRole: (pairId, index, role) =>
+        set((state) => {
+            const pair = state.pairs.get(pairId)
+            if (!pair) return state
+            const segs = getPairSegVolumes(pair)
+            if (index < 0 || index >= segs.length) return state
+            const newPairs = new Map(state.pairs)
+            const newSegs = [...segs]
+            newSegs[index] = { ...newSegs[index], role }
+            newPairs.set(pairId, { ...pair, segVolumes: newSegs })
+            return { pairs: newPairs }
+        }),
+
     updateSegVisible: (pairId, index, visible) =>
         set((state) => {
             const pair = state.pairs.get(pairId)
@@ -347,6 +381,8 @@ export const useViewerStore = create<ViewerState>((set) => ({
     setViewMode: (mode) => set({ viewMode: mode }),
 
     setDatasetCase: (caseState) => set({ datasetCase: caseState }),
+
+    setDatasetLesionStats: (stats) => set({ datasetLesionStats: stats }),
 
     setCleanDatasetMode: (v) => set({ cleanDatasetMode: v }),
 

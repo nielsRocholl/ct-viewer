@@ -17,6 +17,7 @@
     "mac": {
       "category": "public.app-category.medical",
       "icon": "electron/assets/icon.icns",
+      "identity": null,
       "target": [
         {
           "target": "dmg",
@@ -48,6 +49,6 @@
   },
   "devDependencies": {
     "electron": "^28.0.0",
-    "electron-builder": "^24.9.1"
+    "electron-builder": "^25.0.0"
   }
 }

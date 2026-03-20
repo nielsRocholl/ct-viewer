@@ -8,7 +8,7 @@ import { Slider } from './ui/slider'
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
-import { RotateCcw, Link, Unlink, Upload, FolderOpen, Info } from 'lucide-react'
+import { RotateCcw, Link, Unlink, FolderOpen, Info, ChevronDown, FileUp, BarChart3 } from 'lucide-react'
 import { AXIS_MAP } from '@/lib/synchronization'
 import { fetchFirstSliceWithMask } from '@/lib/api-client'
 import type { ViewOrientation } from '@/lib/store'
@@ -25,6 +25,12 @@ import {
     DialogHeader,
     DialogTitle,
 } from './ui/dialog'
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from './ui/dropdown-menu'
 
 const SLIDER_DEBOUNCE_MS = 32
 
@@ -69,14 +75,17 @@ export function GlobalControls() {
     const viewMode = useViewerStore((state) => state.viewMode)
     const setViewMode = useViewerStore((state) => state.setViewMode)
     const setDatasetCase = useViewerStore((state) => state.setDatasetCase)
+    const setDatasetLesionStats = useViewerStore((state) => state.setDatasetLesionStats)
     const pairControlsExpanded = useViewerStore((state) => state.pairControlsExpanded)
     const setAllPairsControlsExpanded = useViewerStore((state) => state.setAllPairsControlsExpanded)
     const globalSlicePhysical = useViewerStore((state) => state.globalSlicePhysical)
 
     const [sliderValue, setSliderValue] = useState(0)
     const [syncDirectionDialogOpen, setSyncDirectionDialogOpen] = useState(false)
-    const [uploadInfoOpen, setUploadInfoOpen] = useState(false)
-    const [datasetInfoOpen, setDatasetInfoOpen] = useState(false)
+    const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
+    const [datasetDialogOpen, setDatasetDialogOpen] = useState(false)
+    const [datasetDialogMode, setDatasetDialogMode] = useState<'load' | 'stats'>('load')
+    const [openDataHelpOpen, setOpenDataHelpOpen] = useState(false)
     const [cleanInfoOpen, setCleanInfoOpen] = useState(false)
     const [syncInfoOpen, setSyncInfoOpen] = useState(false)
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -334,6 +343,12 @@ export function GlobalControls() {
         toast.info('Left dataset mode')
     }
 
+    const handleCloseStatistics = () => {
+        setDatasetLesionStats(null)
+        setViewMode('pairs')
+        toast.info('Statistics closed')
+    }
+
     const handleSnapToMaskToggle = async (checked: boolean) => {
         setSnapToMask(checked)
         if (checked && viewMode === 'pairs' && hasPairs) {
@@ -455,99 +470,116 @@ export function GlobalControls() {
                 </div>
             ) : (
                 <>
+                    <FileUploadDialog open={uploadDialogOpen} onOpenChange={setUploadDialogOpen} />
+                    <DatasetLoadDialog
+                        open={datasetDialogOpen}
+                        onOpenChange={(o) => {
+                            setDatasetDialogOpen(o)
+                            if (!o) setDatasetDialogMode('load')
+                        }}
+                        mode={datasetDialogMode}
+                    />
                     <div className="flex min-h-9 w-full items-center">
                         <div className="flex w-full items-center gap-2">
-                            <FileUploadDialog
-                                trigger={
-                                    <Button className="w-full gap-2" variant="outline">
-                                        <Upload className="h-4 w-4" />
-                                        Upload
+                            <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                    <Button type="button" className="w-full gap-2" variant="outline">
+                                        <FolderOpen className="h-4 w-4 shrink-0" />
+                                        Open
+                                        <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
                                     </Button>
-                                }
-                            />
-                            <Dialog open={uploadInfoOpen} onOpenChange={setUploadInfoOpen}>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="start" className="min-w-[var(--radix-dropdown-menu-trigger-width)]">
+                                    <DropdownMenuItem
+                                        className="cursor-pointer flex-col items-start gap-0.5 py-2"
+                                        onSelect={() => setUploadDialogOpen(true)}
+                                    >
+                                        <span className="flex items-center gap-2 font-medium">
+                                            <FileUp className="h-4 w-4 shrink-0" />
+                                            Open single scan
+                                        </span>
+                                        <span className="pl-6 text-xs font-normal text-muted-foreground">
+                                            One CT volume; optional label maps
+                                        </span>
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                        className="cursor-pointer flex-col items-start gap-0.5 py-2"
+                                        onSelect={() => {
+                                            setDatasetDialogMode('load')
+                                            setDatasetDialogOpen(true)
+                                        }}
+                                    >
+                                        <span className="flex items-center gap-2 font-medium">
+                                            <FolderOpen className="h-4 w-4 shrink-0" />
+                                            Open dataset
+                                        </span>
+                                        <span className="pl-6 text-xs font-normal text-muted-foreground">
+                                            Folders of cases on disk
+                                        </span>
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                        className="cursor-pointer flex-col items-start gap-0.5 py-2"
+                                        onSelect={() => {
+                                            setDatasetDialogMode('stats')
+                                            setDatasetDialogOpen(true)
+                                        }}
+                                    >
+                                        <span className="flex items-center gap-2 font-medium">
+                                            <BarChart3 className="h-4 w-4 shrink-0" />
+                                            Calculate dataset statistics
+                                        </span>
+                                        <span className="pl-6 text-xs font-normal text-muted-foreground">
+                                            Lesion size distribution (connected components)
+                                        </span>
+                                    </DropdownMenuItem>
+                                </DropdownMenuContent>
+                            </DropdownMenu>
+                            <Dialog open={openDataHelpOpen} onOpenChange={setOpenDataHelpOpen}>
                                 <Button
                                     type="button"
                                     variant="ghost"
                                     size="icon"
-                                    className="h-9 w-9"
-                                    onClick={() => setUploadInfoOpen(true)}
-                                    aria-label="Upload pair info"
+                                    className="h-9 w-9 shrink-0"
+                                    onClick={() => setOpenDataHelpOpen(true)}
+                                    aria-label="How opening data works"
                                 >
                                     <Info className="h-4 w-4" />
                                 </Button>
-                                <DialogContent className="sm:max-w-[520px]">
+                                <DialogContent className="sm:max-w-[520px] max-h-[85vh] overflow-y-auto">
                                     <DialogHeader>
-                                        <DialogTitle>Upload CT and Segmentation Pair</DialogTitle>
+                                        <DialogTitle>Opening data</DialogTitle>
                                     </DialogHeader>
-                                    <div className="space-y-3 text-sm text-muted-foreground">
-                                        <div>
-                                            <div className="font-medium text-foreground">Goal</div>
-                                            <div>Create a new CT + mask pair for viewing.</div>
-                                        </div>
-                                        <div>
-                                            <div className="font-medium text-foreground">What happens</div>
-                                            <ul className="list-disc pl-5 space-y-1">
-                                                <li>Upload one CT volume; optionally add up to 10 segmentation masks.</li>
-                                                <li>Masks can be added later from the panel.</li>
-                                            </ul>
-                                        </div>
-                                        <div>
+                                    <div className="space-y-6 text-sm text-muted-foreground">
+                                        <div className="space-y-2">
+                                            <div className="font-medium text-foreground">Open single scan</div>
+                                            <div>Pick one CT volume for a quick look; add up to 20 segmentations if you want.</div>
                                             <div className="font-medium text-foreground">Formats</div>
                                             <div className="font-mono text-xs">.nii, .nii.gz, .mha, .mhd</div>
                                         </div>
-                                    </div>
-                                </DialogContent>
-                            </Dialog>
-                        </div>
-                    </div>
-                    <div className="flex min-h-9 w-full items-center">
-                        <div className="flex w-full items-center gap-2">
-                            <DatasetLoadDialog
-                                trigger={
-                                    <Button className="w-full gap-2" variant="outline">
-                                        <FolderOpen className="h-4 w-4" />
-                                        Load Dataset
-                                    </Button>
-                                }
-                            />
-                            <Dialog open={datasetInfoOpen} onOpenChange={setDatasetInfoOpen}>
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-9 w-9"
-                                    onClick={() => setDatasetInfoOpen(true)}
-                                    aria-label="Load dataset info"
-                                >
-                                    <Info className="h-4 w-4" />
-                                </Button>
-                                <DialogContent className="sm:max-w-[520px]">
-                                    <DialogHeader>
-                                        <DialogTitle>Load Dataset</DialogTitle>
-                                    </DialogHeader>
-                                    <div className="space-y-3 text-sm text-muted-foreground">
-                                        <div>
-                                            <div className="font-medium text-foreground">Goal</div>
-                                            <div>Browse a dataset on disk and inspect cases one by one.</div>
-                                        </div>
-                                        <div>
-                                            <div className="font-medium text-foreground">What happens</div>
+                                        <div className="space-y-2">
+                                            <div className="font-medium text-foreground">Open dataset</div>
+                                            <div>Browse many cases from folders; inspect CT, labels, and predictions case by case.</div>
                                             <ul className="list-disc pl-5 space-y-1">
                                                 <li>Images folder is required.</li>
                                                 <li>Labels and predictions are optional.</li>
                                                 <li>Cases are matched by base name (nnUNet naming supported).</li>
                                             </ul>
                                         </div>
-                                        <div>
-                                            <div className="font-medium text-foreground">Result</div>
-                                            <div>You can navigate cases and inspect CT, labels, and predictions.</div>
-                                        </div>
                                     </div>
                                 </DialogContent>
                             </Dialog>
                         </div>
                     </div>
+                    {viewMode === 'datasetStats' && (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="w-full"
+                            onClick={handleCloseStatistics}
+                        >
+                            Close statistics
+                        </Button>
+                    )}
                 </>
             )}
 
@@ -747,7 +779,7 @@ export function GlobalControls() {
             {/* Status Info */}
             {viewMode === 'pairs' && !hasPairs && (
                 <p className="text-xs text-muted-foreground text-center pt-2 border-t">
-                    Load pairs or a dataset to get started
+                    Load pairs, a dataset, or run statistics from Open
                 </p>
             )}
             {viewMode === 'pairs' && hasPairs && (
@@ -758,6 +790,11 @@ export function GlobalControls() {
             {viewMode === 'dataset' && (
                 <p className="text-xs text-muted-foreground text-center pt-2 border-t">
                     Dataset inspection mode — use arrows in main view to navigate
+                </p>
+            )}
+            {viewMode === 'datasetStats' && (
+                <p className="text-xs text-muted-foreground text-center pt-2 border-t">
+                    Statistics only — open a dataset separately to browse cases
                 </p>
             )}
 

@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Dict
+import asyncio
 import logging
 import os
 import sys
@@ -18,15 +19,20 @@ from services.slice_extractor import SliceExtractorService, SliceExtractionError
 from services.resampler import ResamplerService, ResamplingError
 from services.cache_manager import CacheManager
 from services.dataset_service import scan_dataset
+from services.dataset_case_statistics import compute_case_statistics
 
 # Configure comprehensive logging
+_log_path = os.environ.get('MANGOCT_LOG_PATH', 'backend.log')
+_handlers = [logging.StreamHandler(sys.stdout)]
+if _log_path:
+    try:
+        _handlers.append(logging.FileHandler(_log_path, mode='a'))
+    except OSError:
+        pass
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('backend.log', mode='a')
-    ]
+    handlers=_handlers,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +59,9 @@ geometry_validator = GeometryValidatorService()
 slice_extractor = SliceExtractorService()
 resampler = ResamplerService()
 cache_manager = CacheManager(max_memory_mb=int(os.getenv("MAX_CACHE_SIZE_MB", "4096")))
+# LRU PNG slice cache (same CacheManager budget as configured max MB).
+_SLICE_CACHE_ENABLED = os.getenv("SLICE_PNG_CACHE", "1").lower() in ("1", "true", "yes")
+_SLICE_HTTP_CACHE = {"Cache-Control": "private, max-age=86400"}
 
 # Configuration
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "2048"))  # 2GB default
@@ -66,6 +75,25 @@ datasets_storage: Dict[str, dict] = {}
 
 VALID_ORIENTATIONS = ("axial", "sagittal", "coronal")
 AXIS_MAP = {"axial": 2, "sagittal": 0, "coronal": 1}
+
+
+def _ct_slice_cache_key(
+    volume_id: str, slice_index: int, orientation: str, window_level: float, window_width: float
+) -> str:
+    return f"slice:ct:{volume_id}:{orientation}:{slice_index}:{window_level:.6g}:{window_width:.6g}"
+
+
+def _seg_slice_cache_key(volume_id: str, slice_index: int, orientation: str, mode: str) -> str:
+    return f"slice:seg:{volume_id}:{orientation}:{slice_index}:{mode}"
+
+
+def unload_volume_cascade(volume_id: str) -> None:
+    if _SLICE_CACHE_ENABLED:
+        n = cache_manager.evict_prefix(f"slice:ct:{volume_id}:")
+        n += cache_manager.evict_prefix(f"slice:seg:{volume_id}:")
+        if n:
+            logger.debug("Evicted %d cached PNG slice(s) for volume %s", n, volume_id)
+    volume_loader.unload_volume(volume_id)
 
 
 def _err(status_code: int, error: str, message: str, detail: str | None = None) -> JSONResponse:
@@ -159,6 +187,7 @@ class SegmentationStats(BaseModel):
     component_count: int
     multi_label: bool
     nonzero_label_count: int
+    label_values: Optional[list[int]] = None
 
 
 class PairMetadataResponse(BaseModel):
@@ -244,6 +273,45 @@ class OpenCaseResponse(BaseModel):
 class GetCasesResponse(BaseModel):
     case_count: int
     case_ids: list[str]
+
+
+class GlobalIntensityStats(BaseModel):
+    minimum: float
+    maximum: float
+    mean: float
+    sigma: float
+
+
+class PerLabelStatistics(BaseModel):
+    label: int
+    voxel_count: int
+    volume_mm3: float
+    ct_mean: float
+    ct_sigma: float
+    ct_min: float
+    ct_max: float
+
+
+class CaseStatisticsRequest(BaseModel):
+    case_index: int
+    seg_index: int = 0
+
+
+class CaseStatisticsResponse(BaseModel):
+    case_id: str
+    skipped: bool
+    warning: Optional[str] = None
+    geometry_match: bool
+    ct: VolumeMetadataResponse
+    seg: VolumeMetadataResponse
+    volumes_mm3: list[float]
+    max_component_mm3: Optional[float] = None
+    global_intensity: GlobalIntensityStats
+    label_values: list[int]
+    multi_label: bool
+    per_label: list[PerLabelStatistics]
+    ct_file_meta: dict[str, str]
+    seg_file_meta: dict[str, str]
 
 
 class DatasetDecisionRequest(BaseModel):
@@ -342,8 +410,8 @@ async def upload_volume(file: UploadFile = File(...)):
             
             cache_stats = cache_manager.get_stats()
             logger.info(
-                f"Cache status after load: "
-                f"volumes={cache_stats['volume_count']}, "
+                f"Slice PNG cache after load: "
+                f"entries={cache_stats['volume_count']}, "
                 f"memory_used={cache_stats['memory_used_mb']:.2f}MB, "
                 f"memory_limit={cache_stats['memory_limit_mb']}MB"
             )
@@ -382,7 +450,7 @@ async def get_volume_metadata(volume_id: str):
 async def delete_volume(volume_id: str):
     """Unload a volume from cache"""
     try:
-        volume_loader.unload_volume(volume_id)
+        unload_volume_cascade(volume_id)
         logger.info(f"Deleted volume: {volume_id}")
         return Response(status_code=204)
     except Exception as e:
@@ -621,6 +689,63 @@ async def get_dataset_cases(dataset_id: str):
     return GetCasesResponse(case_count=len(ds["case_ids"]), case_ids=ds["case_ids"])
 
 
+@app.post("/api/datasets/{dataset_id}/cases/statistics", response_model=CaseStatisticsResponse)
+async def dataset_case_statistics(dataset_id: str, body: CaseStatisticsRequest):
+    """Load CT + one segmentation; return combined case statistics; unload both."""
+    if dataset_id not in datasets_storage:
+        raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
+    ds = datasets_storage[dataset_id]
+    case_ids = ds["case_ids"]
+    cases = ds["cases"]
+    if body.case_index < 0 or body.case_index >= len(case_ids):
+        raise HTTPException(status_code=400, detail="case_index out of range")
+    case_id = case_ids[body.case_index]
+    entry = cases[case_id]
+    image_path = entry.get("image")
+    if not image_path:
+        raise HTTPException(status_code=400, detail="No image path for case")
+    segs = entry.get("segs", [])
+    if body.seg_index < 0 or body.seg_index >= len(segs):
+        raise HTTPException(status_code=400, detail="seg_index out of range")
+    seg_entry = segs[body.seg_index]
+    seg_path = seg_entry.get("path")
+    if not seg_path:
+        raise HTTPException(status_code=400, detail="No segmentation path for this case and seg_index")
+
+    ct_meta = await volume_loader.load_volume(image_path)
+    seg_meta = await volume_loader.load_volume(seg_path)
+    ct_id, seg_id = ct_meta.volume_id, seg_meta.volume_id
+    try:
+        ct_img = volume_loader.get_volume(ct_id)
+        seg_img = volume_loader.get_volume(seg_id)
+        raw = compute_case_statistics(ct_img, seg_img, ct_meta, seg_meta)
+        gi = raw["global_intensity"]
+        return CaseStatisticsResponse(
+            case_id=case_id,
+            skipped=raw["skipped"],
+            warning=raw["warning"],
+            geometry_match=raw["geometry_match"],
+            ct=metadata_to_response(raw["ct_meta"]),
+            seg=metadata_to_response(raw["seg_meta"]),
+            volumes_mm3=raw["volumes_mm3"],
+            max_component_mm3=raw["max_component_mm3"],
+            global_intensity=GlobalIntensityStats(
+                minimum=gi["minimum"],
+                maximum=gi["maximum"],
+                mean=gi["mean"],
+                sigma=gi["sigma"],
+            ),
+            label_values=raw["label_values"],
+            multi_label=raw["multi_label"],
+            per_label=[PerLabelStatistics(**row) for row in raw["per_label"]],
+            ct_file_meta=raw["ct_file_meta"],
+            seg_file_meta=raw["seg_file_meta"],
+        )
+    finally:
+        unload_volume_cascade(ct_id)
+        unload_volume_cascade(seg_id)
+
+
 @app.post("/api/datasets/{dataset_id}/open-case", response_model=OpenCaseResponse)
 async def open_dataset_case(dataset_id: str, body: OpenCaseRequest):
     """Load volumes for a case on demand; unload previous case volumes."""
@@ -645,7 +770,7 @@ async def open_dataset_case(dataset_id: str, body: OpenCaseRequest):
 
     for vid in ds.get("last_opened_volume_ids", []):
         try:
-            volume_loader.unload_volume(vid)
+            unload_volume_cascade(vid)
         except Exception:
             pass
     ds["last_opened_volume_ids"] = []
@@ -831,22 +956,39 @@ async def get_ct_slice(
             f"CT slice request: volume={volume_id}, index={slice_index}, "
             f"orientation={orientation}, window_level={window_level}, window_width={window_width}"
         )
-        
-        # Get volume
+        cache_key = _ct_slice_cache_key(volume_id, slice_index, orientation, window_level, window_width)
+        if _SLICE_CACHE_ENABLED:
+            cached = cache_manager.get(cache_key)
+            if cached is not None:
+                latency = time.time() - start_time
+                logger.debug(
+                    "CT slice cache hit: volume=%s index=%s latency=%.2fms",
+                    volume_id,
+                    slice_index,
+                    latency * 1000,
+                )
+                return Response(
+                    content=cached, media_type="image/png", headers=dict(_SLICE_HTTP_CACHE)
+                )
+
         volume = volume_loader.get_volume(volume_id)
-        
-        # Extract slice
-        slice_bytes = slice_extractor.extract_ct_slice(
-            volume=volume,
-            slice_index=slice_index,
-            orientation=orientation,
-            window_level=window_level,
-            window_width=window_width
-        )
-        
+
+        def _extract():
+            return slice_extractor.extract_ct_slice(
+                volume=volume,
+                slice_index=slice_index,
+                orientation=orientation,
+                window_level=window_level,
+                window_width=window_width,
+            )
+
+        slice_bytes = await asyncio.to_thread(_extract)
+        if _SLICE_CACHE_ENABLED:
+            cache_manager.put(cache_key, slice_bytes, len(slice_bytes))
+
         latency = time.time() - start_time
         logger.info(f"CT slice generated: volume={volume_id}, index={slice_index}, orientation={orientation}, latency={latency*1000:.2f}ms")
-        return Response(content=slice_bytes, media_type="image/png")
+        return Response(content=slice_bytes, media_type="image/png", headers=dict(_SLICE_HTTP_CACHE))
     except VolumeLoadError as e:
         logger.error(f"Volume not found for slice extraction: {e}", exc_info=True)
         raise HTTPException(status_code=404, detail=str(e))
@@ -903,21 +1045,38 @@ async def get_segmentation_slice(
             f"Segmentation slice request: volume={volume_id}, index={slice_index}, "
             f"orientation={orientation}, mode={mode}"
         )
-        
-        # Get volume
+        cache_key = _seg_slice_cache_key(volume_id, slice_index, orientation, mode)
+        if _SLICE_CACHE_ENABLED:
+            cached = cache_manager.get(cache_key)
+            if cached is not None:
+                latency = time.time() - start_time
+                logger.debug(
+                    "Seg slice cache hit: volume=%s index=%s latency=%.2fms",
+                    volume_id,
+                    slice_index,
+                    latency * 1000,
+                )
+                return Response(
+                    content=cached, media_type="image/png", headers=dict(_SLICE_HTTP_CACHE)
+                )
+
         volume = volume_loader.get_volume(volume_id)
-        
-        # Extract slice
-        slice_bytes = slice_extractor.extract_segmentation_slice(
-            volume=volume,
-            slice_index=slice_index,
-            orientation=orientation,
-            mode=mode
-        )
-        
+
+        def _extract():
+            return slice_extractor.extract_segmentation_slice(
+                volume=volume,
+                slice_index=slice_index,
+                orientation=orientation,
+                mode=mode,
+            )
+
+        slice_bytes = await asyncio.to_thread(_extract)
+        if _SLICE_CACHE_ENABLED:
+            cache_manager.put(cache_key, slice_bytes, len(slice_bytes))
+
         latency = time.time() - start_time
         logger.info(f"Segmentation slice generated: volume={volume_id}, index={slice_index}, orientation={orientation}, mode={mode}, latency={latency*1000:.2f}ms")
-        return Response(content=slice_bytes, media_type="image/png")
+        return Response(content=slice_bytes, media_type="image/png", headers=dict(_SLICE_HTTP_CACHE))
     except VolumeLoadError as e:
         logger.error(f"Volume not found for slice extraction: {e}", exc_info=True)
         raise HTTPException(status_code=404, detail=str(e))
@@ -927,6 +1086,33 @@ async def get_segmentation_slice(
     except Exception as e:
         logger.error(f"Error extracting segmentation slice: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/volumes/dice")
+async def get_dice(
+    gt_volume_id: str = Query(..., description="Ground truth volume ID"),
+    pred_volume_id: str = Query(..., description="Prediction volume ID"),
+):
+    """Compute image-level DICE between GT and prediction segmentation volumes."""
+    import numpy as np
+    import SimpleITK as sitk
+    try:
+        gt = volume_loader.get_volume(gt_volume_id)
+        pred = volume_loader.get_volume(pred_volume_id)
+        gt_meta = volume_loader.get_metadata(gt_volume_id)
+        pred_meta = volume_loader.get_metadata(pred_volume_id)
+        if not geometry_validator.validate_geometry(gt_meta, pred_meta).compatible:
+            pred = resampler.resample_to_reference(pred, gt, sitk.sitkNearestNeighbor)
+        ga = (np.asarray(sitk.GetArrayFromImage(gt)) != 0).astype(bool)
+        pa = (np.asarray(sitk.GetArrayFromImage(pred)) != 0).astype(bool)
+        inter = np.sum(ga & pa)
+        denom = np.sum(ga) + np.sum(pa)
+        dice = 2.0 * inter / denom if denom > 0 else 1.0
+        return {"dice": round(float(dice), 4)}
+    except VolumeLoadError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ResamplingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/slices/segmentation/{volume_id}/first-slice-index")
@@ -943,6 +1129,31 @@ async def get_first_slice_with_mask(
             slice_index = slice_extractor.middle_slice_with_foreground(volume, orientation)
         else:
             slice_index = slice_extractor.first_slice_with_foreground(volume, orientation)
+        return {"slice_index": slice_index}
+    except VolumeLoadError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except SliceExtractionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/slices/segmentation/{volume_id}/slice-for-component")
+async def get_slice_for_component(
+    volume_id: str,
+    orientation: str = Query("axial", description="Slice orientation: axial, sagittal, or coronal"),
+    component_index: int = Query(..., ge=1, description="1-based component index (ordered by size)"),
+):
+    """Return slice index at centroid of the given connected component."""
+    try:
+        _check_orientation(orientation)
+        volume = volume_loader.get_volume(volume_id)
+        stats = volume_loader.get_label_stats(volume_id)
+        max_comp = stats.get("component_count", 0)
+        if component_index > max_comp:
+            raise HTTPException(
+                status_code=400,
+                detail=f"component_index {component_index} out of range [1, {max_comp}]",
+            )
+        slice_index = slice_extractor.middle_slice_for_component(volume, orientation, component_index)
         return {"slice_index": slice_index}
     except VolumeLoadError as e:
         raise HTTPException(status_code=404, detail=str(e))

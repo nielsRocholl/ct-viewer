@@ -2,10 +2,23 @@
 
 import { useState, useRef } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { registerDataset, openDatasetCase } from '@/lib/api-client'
-import type { SegmentationDir, SegmentationVolumeInfo } from '@/lib/api-types'
-import { useViewerStore } from '@/lib/store'
-import { DEFAULT_LABEL_COLOR, DEFAULT_PRED_COLOR, generateDistinctColor } from '@/lib/color-utils'
+import { registerDataset, openDatasetCase, fetchDatasetCaseStatistics } from '@/lib/api-client'
+import type {
+    CaseStatisticsResponse,
+    OpenCaseResponse,
+    RegisterDatasetResponse,
+    SegmentationDir,
+    SegmentationVolumeInfo,
+} from '@/lib/api-types'
+import { buildDatasetStatisticsPayload } from '@/lib/dataset-stats-aggregate'
+import { useViewerStore, type DatasetCaseState } from '@/lib/store'
+import {
+    DEFAULT_LABEL_COLOR,
+    DEFAULT_PRED_COLOR,
+    generateDistinctColor,
+    createColorMapFromPalette,
+    colorMapToRecord,
+} from '@/lib/color-utils'
 import {
     Dialog,
     DialogContent,
@@ -19,6 +32,7 @@ import { Label } from './ui/label'
 import { Input } from './ui/input'
 import { Badge } from './ui/badge'
 import { Card, CardContent, CardHeader } from './ui/card'
+import { Progress } from './ui/progress'
 import { FolderOpen, ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -32,14 +46,117 @@ const ordinal = (n: number) => {
 
 interface DatasetLoadDialogProps {
     trigger?: React.ReactNode
+    open?: boolean
+    onOpenChange?: (open: boolean) => void
+    mode?: 'load' | 'stats'
 }
 
 interface SegEntry extends SegmentationDir {
     color: string
 }
 
-export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
-    const [open, setOpen] = useState(false)
+function segVolumesFromOpenResponse(
+    openRes: OpenCaseResponse,
+    segs: SegEntry[]
+): DatasetCaseState['segVolumes'] {
+    return (
+        openRes.seg_volume_ids?.map((s: SegmentationVolumeInfo, i: number) => {
+            const labelValues = s.label_values ?? []
+            const multiLabel = labelValues.length > 1
+            const colorMap =
+                multiLabel
+                    ? colorMapToRecord(createColorMapFromPalette(labelValues, 'colorblind', i))
+                    : undefined
+            return {
+                volumeId: s.volume_id,
+                role: s.role,
+                name: s.name,
+                allBackground: s.all_background ?? null,
+                componentCount: s.component_count ?? null,
+                multiLabel: s.multi_label ?? null,
+                nonzeroLabelCount: s.nonzero_label_count ?? null,
+                labelValues,
+                color:
+                    !multiLabel
+                        ? (segs[i]?.color ??
+                            (s.role === 'pred'
+                                ? DEFAULT_PRED_COLOR
+                                : generateDistinctColor(i, openRes.seg_volume_ids?.length)))
+                        : undefined,
+                colorMap,
+                visible: true,
+                mode: 'filled' as const,
+            }
+        }) ?? [
+            ...(openRes.label_volume_id
+                ? [
+                    {
+                        volumeId: openRes.label_volume_id,
+                        role: 'gt' as const,
+                        name: 'Label',
+                        allBackground: openRes.label_all_background ?? null,
+                        componentCount: null,
+                        multiLabel: null,
+                        nonzeroLabelCount: null,
+                        labelValues: null,
+                        color: DEFAULT_LABEL_COLOR,
+                        visible: true,
+                        mode: 'filled' as const,
+                    },
+                ]
+                : []),
+            ...(openRes.pred_volume_id
+                ? [
+                    {
+                        volumeId: openRes.pred_volume_id,
+                        role: 'pred' as const,
+                        name: 'Prediction',
+                        allBackground: null,
+                        componentCount: null,
+                        multiLabel: null,
+                        nonzeroLabelCount: null,
+                        labelValues: null,
+                        color: DEFAULT_PRED_COLOR,
+                        visible: true,
+                        mode: 'filled' as const,
+                    },
+                ]
+                : []),
+        ]
+    )
+}
+
+function datasetCaseFromOpen(
+    reg: RegisterDatasetResponse,
+    openRes: OpenCaseResponse,
+    segs: SegEntry[]
+): DatasetCaseState {
+    return {
+        datasetId: reg.dataset_id,
+        caseIndex: openRes.case_index,
+        caseCount: reg.case_count,
+        caseId: openRes.case_id,
+        imageVolumeId: openRes.image_volume_id,
+        segVolumes: segVolumesFromOpenResponse(openRes, segs),
+        warnings: openRes.warnings ?? [],
+    }
+}
+
+export function DatasetLoadDialog({
+    trigger,
+    open: openProp,
+    onOpenChange,
+    mode = 'load',
+}: DatasetLoadDialogProps) {
+    const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
+    const controlled = openProp !== undefined
+    const open = controlled ? openProp : uncontrolledOpen
+
+    const setDialogOpen = (v: boolean) => {
+        if (!v) setScanProgress(null)
+        if (!controlled) setUncontrolledOpen(v)
+        onOpenChange?.(v)
+    }
     const [imagesDir, setImagesDir] = useState('')
     const [segs, setSegs] = useState<SegEntry[]>([])
     const [expandedSeg, setExpandedSeg] = useState<number | null>(null)
@@ -47,6 +164,9 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
 
     const setViewMode = useViewerStore((s) => s.setViewMode)
     const setDatasetCase = useViewerStore((s) => s.setDatasetCase)
+    const setDatasetLesionStats = useViewerStore((s) => s.setDatasetLesionStats)
+
+    const [scanProgress, setScanProgress] = useState<{ current: number; total: number } | null>(null)
 
     const registerMutation = useMutation({
         mutationFn: registerDataset,
@@ -84,66 +204,10 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
                 datasetId: reg.dataset_id,
             })
             setViewMode('dataset')
-            const segVolumes =
-                openRes.seg_volume_ids?.map((s: SegmentationVolumeInfo, i: number) => ({
-                    volumeId: s.volume_id,
-                    role: s.role,
-                    name: s.name,
-                    allBackground: s.all_background ?? null,
-                    componentCount: s.component_count ?? null,
-                    multiLabel: s.multi_label ?? null,
-                    nonzeroLabelCount: s.nonzero_label_count ?? null,
-                    labelValues: s.label_values ?? null,
-                    color:
-                        segs[i]?.color ??
-                        (s.role === 'pred'
-                            ? DEFAULT_PRED_COLOR
-                            : generateDistinctColor(i, openRes.seg_volume_ids?.length)),
-                    visible: true,
-                    mode: 'filled' as const,
-                })) ??
-                [
-                    ...(openRes.label_volume_id
-                        ? [{
-                            volumeId: openRes.label_volume_id,
-                            role: 'gt' as const,
-                            name: 'Label',
-                            allBackground: openRes.label_all_background ?? null,
-                            componentCount: null,
-                            multiLabel: null,
-                            nonzeroLabelCount: null,
-                            labelValues: null,
-                            color: DEFAULT_LABEL_COLOR,
-                            visible: true,
-                            mode: 'filled' as const,
-                        }]
-                        : []),
-                    ...(openRes.pred_volume_id
-                        ? [{
-                            volumeId: openRes.pred_volume_id,
-                            role: 'pred' as const,
-                            name: 'Prediction',
-                            allBackground: null,
-                            componentCount: null,
-                            multiLabel: null,
-                            nonzeroLabelCount: null,
-                            labelValues: null,
-                            color: DEFAULT_PRED_COLOR,
-                            visible: true,
-                            mode: 'filled' as const,
-                        }]
-                        : []),
-                ]
-            setDatasetCase({
-                datasetId: reg.dataset_id,
-                caseIndex: openRes.case_index,
-                caseCount: reg.case_count,
-                caseId: openRes.case_id,
-                imageVolumeId: openRes.image_volume_id,
-                segVolumes,
-                warnings: openRes.warnings ?? [],
-            })
-            setOpen(false)
+            setDatasetLesionStats(null)
+            const segVolumes = segVolumesFromOpenResponse(openRes, segs)
+            setDatasetCase(datasetCaseFromOpen(reg, openRes, segs))
+            setDialogOpen(false)
             toast.success('Dataset loaded', {
                 description: `${reg.case_count} cases, viewing case 1`,
             })
@@ -157,28 +221,107 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
         }
     }
 
-    const isLoading = registerMutation.isPending || openCaseMutation.isPending
+    const handleStatsSubmit = async () => {
+        const images = imagesDir.trim()
+        if (!images) {
+            toast.error('Images directory is required')
+            return
+        }
+        const segIndex = segs.findIndex((s) => s.path.trim())
+        if (segIndex < 0) {
+            toast.error('Add at least one segmentation folder', {
+                description: 'Lesion statistics require a segmentation volume for each case.',
+            })
+            return
+        }
+        try {
+            const reg = await registerMutation.mutateAsync({
+                images_dir: images,
+                segmentations: segs
+                    .map((s) => ({
+                        path: s.path.trim(),
+                        role: s.role,
+                        name: s.name?.trim() || undefined,
+                    }))
+                    .filter((s) => s.path),
+            })
+            const responses: CaseStatisticsResponse[] = []
+            setScanProgress({ current: 0, total: reg.case_count })
+            for (let i = 0; i < reg.case_count; i++) {
+                const r = await fetchDatasetCaseStatistics(reg.dataset_id, {
+                    case_index: i,
+                    seg_index: segIndex,
+                })
+                responses.push(r)
+                setScanProgress({ current: i + 1, total: reg.case_count })
+            }
+            const s = segs[segIndex]
+            const segName =
+                s?.name?.trim() ||
+                (s?.role === 'pred' ? 'Prediction' : s?.role === 'gt' ? 'Ground truth' : null)
+            setDatasetLesionStats(
+                buildDatasetStatisticsPayload({
+                    responses,
+                    datasetId: reg.dataset_id,
+                    segIndex,
+                    segName,
+                })
+            )
+            setDatasetCase(null)
+            setViewMode('datasetStats')
+            setDialogOpen(false)
+            toast.success('Dataset statistics ready', {
+                description: `${responses.reduce((n, r) => n + r.volumes_mm3.length, 0)} connected components across ${reg.case_count} cases`,
+            })
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : 'Statistics run failed'
+            toast.error(msg)
+        } finally {
+            setScanProgress(null)
+        }
+    }
+
+    const isLoading =
+        registerMutation.isPending ||
+        (mode === 'load' && openCaseMutation.isPending) ||
+        scanProgress !== null
+
+    const showTrigger = trigger != null || !controlled
 
     return (
-        <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild>
-                {trigger ?? (
-                    <Button variant="outline" className="w-full gap-2">
-                        <FolderOpen className="h-4 w-4" />
-                        Load Dataset
-                    </Button>
-                )}
-            </DialogTrigger>
+        <Dialog open={open} onOpenChange={setDialogOpen}>
+            {showTrigger ? (
+                <DialogTrigger asChild>
+                    {trigger ?? (
+                        <Button variant="outline" className="w-full gap-2">
+                            <FolderOpen className="h-4 w-4" />
+                            Load Dataset
+                        </Button>
+                    )}
+                </DialogTrigger>
+            ) : null}
             <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-y-auto overflow-x-hidden min-w-0">
                 <DialogHeader>
-                    <DialogTitle>Load Dataset</DialogTitle>
-                    <DialogDescription>
-                        {isElectron
-                            ? 'Choose folders for images (required) and optional segmentation folders. Cases matched by base name (nnUNet supported).'
-                            : 'Enter server-accessible folder paths. Cases are matched by base name (nnUNet convention supported).'}
-                    </DialogDescription>
+                    <DialogTitle>{mode === 'stats' ? 'Dataset statistics' : 'Load Dataset'}</DialogTitle>
+                    {mode === 'load' ? (
+                        <DialogDescription>
+                            {isElectron
+                                ? 'Choose folders for images (required) and optional segmentation folders. Cases matched by base name (nnUNet supported).'
+                                : 'Enter server-accessible folder paths. Cases are matched by base name (nnUNet convention supported).'}
+                        </DialogDescription>
+                    ) : null}
                 </DialogHeader>
                 <div className="space-y-6 py-4 min-w-0 overflow-hidden">
+                    {scanProgress && scanProgress.total > 0 ? (
+                        <div className="space-y-2" aria-live="polite">
+                            <p className="text-sm text-muted-foreground">
+                                Scanning cases… {scanProgress.current} / {scanProgress.total}
+                            </p>
+                            <Progress
+                                value={Math.round((100 * scanProgress.current) / scanProgress.total)}
+                            />
+                        </div>
+                    ) : null}
                     {/* Images directory */}
                     <div className="space-y-2">
                         <Label htmlFor="images-dir" className="text-sm font-medium">
@@ -423,7 +566,7 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
                                             path: '',
                                             role: undefined,
                                             name: '',
-                                            color: generateDistinctColor(prev.length, 5),
+                                            color: generateDistinctColor(prev.length),
                                         },
                                     ])
                                     setExpandedSeg(newIndex)
@@ -451,11 +594,20 @@ export function DatasetLoadDialog({ trigger }: DatasetLoadDialogProps) {
                     </div>
                 </div>
                 <div className="flex justify-end gap-2 pt-2">
-                    <Button variant="outline" onClick={() => setOpen(false)} disabled={isLoading}>
+                    <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={isLoading}>
                         Cancel
                     </Button>
-                    <Button onClick={handleSubmit} disabled={isLoading}>
-                        {isLoading ? 'Loading…' : 'Load dataset'}
+                    <Button
+                        onClick={mode === 'stats' ? handleStatsSubmit : handleSubmit}
+                        disabled={isLoading}
+                    >
+                        {isLoading
+                            ? mode === 'stats'
+                                ? 'Working…'
+                                : 'Loading…'
+                            : mode === 'stats'
+                              ? 'Calculate statistics'
+                              : 'Load dataset'}
                     </Button>
                 </div>
             </DialogContent>

@@ -4,6 +4,7 @@ import { useViewerStore } from '@/lib/store'
 import { shallow } from 'zustand/shallow'
 import { ViewerPanel } from './viewer-panel'
 import { DatasetViewerPanel, DatasetNav } from './dataset-viewer-panel'
+import { DatasetLesionStatsSection } from './dataset-lesion-size-chart'
 import { Button } from './ui/button'
 import { X } from 'lucide-react'
 import { Card, CardContent } from './ui/card'
@@ -24,6 +25,9 @@ export function ViewerGrid() {
     const gridColumns = useViewerStore((state) => state.gridColumns)
     const viewMode = useViewerStore((state) => state.viewMode)
     const datasetCase = useViewerStore((state) => state.datasetCase)
+    const datasetLesionStats = useViewerStore((state) => state.datasetLesionStats)
+    const setDatasetLesionStats = useViewerStore((state) => state.setDatasetLesionStats)
+    const setViewMode = useViewerStore((state) => state.setViewMode)
     const canAddMore = pairArray.length < MAX_PAIRS
     const gridColsClass = GRID_COLS_CLASS[Math.min(4, Math.max(1, gridColumns))] ?? 'md:grid-cols-2'
 
@@ -32,6 +36,34 @@ export function ViewerGrid() {
         toast.success('Pair removed', {
             description: `Removed pair ${pairId.slice(0, 8)}`,
         })
+    }
+
+    if (viewMode === 'datasetStats') {
+        if (!datasetLesionStats) {
+            return (
+                <div className="flex items-center justify-center min-h-[400px]">
+                    <Card className="w-full max-w-md">
+                        <CardContent className="p-8 text-center space-y-3">
+                            <p className="text-muted-foreground">No statistics in view.</p>
+                            <Button
+                                variant="outline"
+                                onClick={() => {
+                                    setDatasetLesionStats(null)
+                                    setViewMode('pairs')
+                                }}
+                            >
+                                Back
+                            </Button>
+                        </CardContent>
+                    </Card>
+                </div>
+            )
+        }
+        return (
+            <div className="w-full max-w-[1800px] space-y-4 px-2">
+                <DatasetLesionStatsSection stats={datasetLesionStats} />
+            </div>
+        )
     }
 
     if (viewMode === 'dataset') {
@@ -67,8 +99,9 @@ export function ViewerGrid() {
                             No data loaded yet.
                         </p>
                         <p className="text-sm text-muted-foreground">
-                            Use <span className="font-medium text-foreground">Upload</span> for single CT + masks,
-                            or <span className="font-medium text-foreground">Load dataset</span> for folders.
+                            Use <span className="font-medium text-foreground">Open → single scan</span> for one CT (+ labels),
+                            <span className="font-medium text-foreground"> Open dataset</span> for folders, or{' '}
+                            <span className="font-medium text-foreground">Calculate dataset statistics</span> for lesion sizes.
                         </p>
                         <p className="text-xs text-muted-foreground">
                             Up to {MAX_PAIRS} pairs at once.

@@ -1,21 +1,22 @@
 /** Distinct color per label; colorblind-friendly palette and defaults for segmentation overlay. */
 
-/** Paul Tol–style colorblind-safe palette (blue, orange, teal, yellow, etc.; avoids red–green only). */
+/** Paul Tol–style colorblind-safe palette (deep red first, then orange, teal, etc.). */
 export const COLORBLIND_SAFE_PALETTE = [
-    '#0072B2', '#E69F00', '#009E73', '#F0E442', '#56B4E9',
+    '#8B0000', '#E69F00', '#009E73', '#F0E442', '#56B4E9',
     '#D55E00', '#CC79A7', '#999999', '#882255', '#44AA99',
 ] as const
 
 export const DEFAULT_LABEL_COLOR = COLORBLIND_SAFE_PALETTE[0]
 export const DEFAULT_PRED_COLOR = COLORBLIND_SAFE_PALETTE[1]
 
+/** Single-mask overlay color: cycles `COLORBLIND_SAFE_PALETTE` by mask slot index (0..n). */
 export function generateDistinctColor(
-    labelIndex: number,
-    _totalLabels?: number,
+    maskSlotIndex: number,
+    _totalMasks?: number,
     _saturation?: number,
     _lightness?: number
 ): string {
-    return COLORBLIND_SAFE_PALETTE[labelIndex % COLORBLIND_SAFE_PALETTE.length]
+    return COLORBLIND_SAFE_PALETTE[maskSlotIndex % COLORBLIND_SAFE_PALETTE.length]
 }
 
 export function generateDefaultColorMap(labelValues: number[]): Map<number, string> {
@@ -70,17 +71,32 @@ export const COLOR_PALETTES = {
 
 export function createColorMapFromPalette(
     labelValues: number[],
-    paletteName: keyof typeof COLOR_PALETTES = 'vibrant'
+    paletteName: keyof typeof COLOR_PALETTES = 'colorblind',
+    /** Shift palette index so multiple simultaneous masks do not share the same label→color mapping. */
+    paletteSlotOffset = 0
 ): Map<number, string> {
     const colorMap = new Map<number, string>()
     const palette = COLOR_PALETTES[paletteName]
     const nonZeroLabels = labelValues.filter(label => label !== 0)
-    nonZeroLabels.forEach((label) => {
-        const color = palette[(label - 1) % palette.length]
+    nonZeroLabels.forEach((label, idx) => {
+        const color = palette[(paletteSlotOffset + idx) % palette.length]
         colorMap.set(label, color)
     })
-
     return colorMap
+}
+
+export function colorMapToRecord(map: Map<number, string>): Record<string, string> {
+    const out: Record<string, string> = {}
+    map.forEach((color, label) => {
+        out[String(label)] = color
+    })
+    return out
+}
+
+export function recordToColorMap(record: Record<string, string>): Map<number, string> {
+    const map = new Map<number, string>()
+    Object.entries(record).forEach(([k, v]) => map.set(Number(k), v))
+    return map
 }
 
 export function extractLabelValues(imageData: ImageData): number[] {

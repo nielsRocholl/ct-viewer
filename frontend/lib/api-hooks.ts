@@ -12,6 +12,7 @@ import {
     addSegmentToPair,
     fetchCTSlice,
     fetchSegmentationSlice,
+    fetchDice,
     indexToPhysical,
     physicalToIndex,
 } from './api-client'
@@ -37,6 +38,7 @@ export const queryKeys = {
     pair: (id: string) => ['pairs', id] as const,
     ctSlice: (params: CTSliceParams) => ['ct-slice', params] as const,
     segSlice: (params: SegmentationSliceParams) => ['seg-slice', params] as const,
+    dice: (gtId: string, predId: string) => ['dice', gtId, predId] as const,
 }
 
 // Volume Hooks
@@ -206,6 +208,17 @@ export function useSegmentationSlices(paramsList: (SegmentationSliceParams | nul
                     enabled: false,
                 }
         ),
+    })
+}
+
+export function useDice(gtVolumeId: string | null, predVolumeId: string | null) {
+    return useQuery({
+        queryKey: gtVolumeId && predVolumeId ? queryKeys.dice(gtVolumeId, predVolumeId) : ['dice', 'null'],
+        queryFn: () => {
+            if (!gtVolumeId || !predVolumeId) throw new Error('Both GT and pred volume IDs required')
+            return fetchDice(gtVolumeId, predVolumeId)
+        },
+        enabled: !!gtVolumeId && !!predVolumeId,
     })
 }
 

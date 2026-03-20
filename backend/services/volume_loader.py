@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import SimpleITK as sitk
 
@@ -34,6 +34,34 @@ class VolumeMetadata:
 class VolumeLoadError(Exception):
     """Raised when volume loading fails"""
     pass
+
+
+def connected_component_foreground_volumes_mm3(seg: sitk.Image) -> Tuple[List[float], bool]:
+    """Binary foreground (seg > 0), 26-connectivity CC; one volume per component in mm³.
+
+    Matches get_label_stats CC definition: touching foreground labels merge into one component.
+    """
+    mask = seg > 0
+    cc_filter = sitk.ConnectedComponentImageFilter()
+    cc_filter.SetFullyConnected(True)
+    cc = cc_filter.Execute(mask)
+    relabel = sitk.RelabelComponentImageFilter()
+    relabel.SetSortByObjectSize(True)
+    relabeled = relabel.Execute(cc)
+    n_obj = int(relabel.GetNumberOfObjects())
+    if n_obj == 0:
+        return [], True
+    spacing = seg.GetSpacing()
+    voxel_mm3 = float(spacing[0] * spacing[1] * spacing[2])
+    ls = sitk.LabelStatisticsImageFilter()
+    ls.Execute(relabeled, relabeled)
+    out: List[float] = []
+    for lab in ls.GetLabels():
+        li = int(lab)
+        if li == 0:
+            continue
+        out.append(float(ls.GetCount(li)) * voxel_mm3)
+    return out, False
 
 
 class VolumeLoaderService:
@@ -227,7 +255,9 @@ class VolumeLoaderService:
             return self._label_stats[volume_id]
         seg = self.get_volume(volume_id)
         mask = seg > 0
-        cc = sitk.ConnectedComponent(mask)
+        cc_filter = sitk.ConnectedComponentImageFilter()
+        cc_filter.SetFullyConnected(True)
+        cc = cc_filter.Execute(mask)
         relabel = sitk.RelabelComponentImageFilter()
         relabel.Execute(cc)
         component_count = int(relabel.GetNumberOfObjects())
@@ -244,7 +274,7 @@ class VolumeLoaderService:
         }
         self._label_stats[volume_id] = out
         return out
-    
+
     def list_volumes(self) -> Dict[str, VolumeMetadata]:
         """Get all loaded volume metadata
         

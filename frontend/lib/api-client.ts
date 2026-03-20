@@ -19,10 +19,14 @@ import {
     OpenCaseRequest,
     OpenCaseResponse,
     GetCasesResponse,
+    DiceResponse,
     FirstSliceWithMaskResponse,
     DatasetDecisionRequest,
     DatasetDecisionResponse,
+    CaseStatisticsRequest,
+    CaseStatisticsResponse,
 } from './api-types'
+import { withSliceFetchSlot } from './slice-fetch-slot'
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -121,63 +125,66 @@ export async function addSegmentToPair(
 // Slice Extraction
 
 export async function fetchCTSlice(params: CTSliceParams): Promise<string> {
-    const searchParams = new URLSearchParams({
-        slice_index: params.slice_index.toString(),
+    return withSliceFetchSlot(async () => {
+        const searchParams = new URLSearchParams({
+            slice_index: params.slice_index.toString(),
+        })
+
+        if (params.orientation) {
+            searchParams.append('orientation', params.orientation)
+        }
+        if (params.window_level !== undefined) {
+            searchParams.append('window_level', params.window_level.toString())
+        }
+        if (params.window_width !== undefined) {
+            searchParams.append('window_width', params.window_width.toString())
+        }
+        if (params.format) {
+            searchParams.append('format', params.format)
+        }
+
+        const response = await fetch(
+            `${API_BASE_URL}/api/slices/ct/${params.volume_id}?${searchParams}`
+        )
+
+        if (!response.ok) {
+            const errorText = await response.text()
+            throw new Error(`Failed to fetch CT slice: ${errorText}`)
+        }
+
+        const blob = await response.blob()
+        return URL.createObjectURL(blob)
     })
-
-    if (params.orientation) {
-        searchParams.append('orientation', params.orientation)
-    }
-    if (params.window_level !== undefined) {
-        searchParams.append('window_level', params.window_level.toString())
-    }
-    if (params.window_width !== undefined) {
-        searchParams.append('window_width', params.window_width.toString())
-    }
-    if (params.format) {
-        searchParams.append('format', params.format)
-    }
-
-    const response = await fetch(
-        `${API_BASE_URL}/api/slices/ct/${params.volume_id}?${searchParams}`
-    )
-
-    if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`Failed to fetch CT slice: ${errorText}`)
-    }
-
-    const blob = await response.blob()
-    return URL.createObjectURL(blob)
 }
 
 export async function fetchSegmentationSlice(params: SegmentationSliceParams): Promise<string> {
-    const searchParams = new URLSearchParams({
-        slice_index: params.slice_index.toString(),
+    return withSliceFetchSlot(async () => {
+        const searchParams = new URLSearchParams({
+            slice_index: params.slice_index.toString(),
+        })
+
+        if (params.orientation) {
+            searchParams.append('orientation', params.orientation)
+        }
+        if (params.mode) {
+            searchParams.append('mode', params.mode)
+        }
+        if (params.format) {
+            searchParams.append('format', params.format)
+        }
+
+        const response = await fetch(
+            `${API_BASE_URL}/api/slices/segmentation/${params.volume_id}?${searchParams}`
+        )
+
+        if (!response.ok) {
+            const errorText = await response.text()
+            throw new Error(`Failed to fetch segmentation slice: ${errorText}`)
+        }
+
+        const blob = await response.blob()
+        return URL.createObjectURL(blob)
     })
-
-    if (params.orientation) {
-        searchParams.append('orientation', params.orientation)
-    }
-    if (params.mode) {
-        searchParams.append('mode', params.mode)
-    }
-    if (params.format) {
-        searchParams.append('format', params.format)
-    }
-
-    const response = await fetch(
-        `${API_BASE_URL}/api/slices/segmentation/${params.volume_id}?${searchParams}`
-    )
-
-    if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`Failed to fetch segmentation slice: ${errorText}`)
-    }
-
-    // Return blob URL for image
-    const blob = await response.blob()
-    return URL.createObjectURL(blob)
 }
 
 export async function fetchWindowFromRoi(
@@ -262,6 +269,18 @@ export async function openDatasetCase(
     return handleResponse<OpenCaseResponse>(response)
 }
 
+export async function fetchDatasetCaseStatistics(
+    datasetId: string,
+    request: CaseStatisticsRequest
+): Promise<CaseStatisticsResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/datasets/${datasetId}/cases/statistics`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ case_index: request.case_index, seg_index: request.seg_index ?? 0 }),
+    })
+    return handleResponse<CaseStatisticsResponse>(response)
+}
+
 export async function submitDatasetDecision(
     datasetId: string,
     request: DatasetDecisionRequest
@@ -285,4 +304,25 @@ export async function fetchFirstSliceWithMask(
         `${API_BASE_URL}/api/slices/segmentation/${volumeId}/first-slice-index?${searchParams}`
     )
     return handleResponse<FirstSliceWithMaskResponse>(response)
+}
+
+export async function fetchSliceForComponent(
+    volumeId: string,
+    orientation: 'axial' | 'sagittal' | 'coronal',
+    componentIndex: number
+): Promise<FirstSliceWithMaskResponse> {
+    const searchParams = new URLSearchParams({
+        orientation,
+        component_index: String(componentIndex),
+    })
+    const response = await fetch(
+        `${API_BASE_URL}/api/slices/segmentation/${volumeId}/slice-for-component?${searchParams}`
+    )
+    return handleResponse<FirstSliceWithMaskResponse>(response)
+}
+
+export async function fetchDice(gtVolumeId: string, predVolumeId: string): Promise<DiceResponse> {
+    const params = new URLSearchParams({ gt_volume_id: gtVolumeId, pred_volume_id: predVolumeId })
+    const response = await fetch(`${API_BASE_URL}/api/volumes/dice?${params}`)
+    return handleResponse<DiceResponse>(response)
 }

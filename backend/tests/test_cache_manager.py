@@ -272,3 +272,12 @@ class TestCacheManager:
         assert not cache.contains("volume1")
         assert cache.contains("volume2")
         assert cache.contains("volume3")
+
+    def test_evict_prefix(self):
+        cache = CacheManager(max_memory_mb=10)
+        cache.put("slice:ct:vol-a:axial:0:40:400", b"a", size_bytes=1)
+        cache.put("slice:ct:vol-a:axial:1:40:400", b"b", size_bytes=1)
+        cache.put("slice:seg:vol-b:axial:0:filled", b"c", size_bytes=1)
+        assert cache.evict_prefix("slice:ct:vol-a:") == 2
+        assert cache.contains("slice:seg:vol-b:axial:0:filled")
+        assert not cache.contains("slice:ct:vol-a:axial:0:40:400")

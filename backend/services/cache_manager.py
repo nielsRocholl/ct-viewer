@@ -206,6 +206,15 @@ class CacheManager:
         )
         
         return True
+
+    def evict_prefix(self, prefix: str) -> int:
+        """Remove all entries whose key starts with prefix (e.g. slice cache for one volume_id)."""
+        n = 0
+        for key in list(self._cache.keys()):
+            if key.startswith(prefix):
+                if self.remove(key):
+                    n += 1
+        return n
     
     def clear(self) -> None:
         """Clear all items from cache"""

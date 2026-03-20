@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const path = require('path')
-const { spawn } = require('child_process')
+const { spawn, execSync } = require('child_process')
 const http = require('http')
 const fs = require('fs')
 
@@ -8,10 +8,15 @@ let mainWindow = null
 let backendProc = null
 let staticServer = null
 
-function waitForBackend(url, timeoutMs) {
+function waitForBackend(url, timeoutMs, onProgress) {
   const start = Date.now()
   return new Promise((resolve, reject) => {
     const tick = () => {
+      const elapsed = Date.now() - start
+      if (onProgress) {
+        const pct = Math.min(15 + (elapsed / timeoutMs) * 65, 80)
+        onProgress(pct, 'Waiting for backend…')
+      }
       const req = http.get(url, (res) => {
         res.resume()
         if (res.statusCode === 200) return resolve()
@@ -133,28 +138,51 @@ async function createWindow() {
     mainWindow.show()
   })
 
+  const sendProgress = (pct, msg) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('splash-progress', { pct, msg })
+    }
+  }
   const loadSplash = async (message) => {
     const msg = message || 'Starting MangoCT…'
     const html = `<!doctype html><html><head><meta charset="utf-8"/><style>
-      html,body{height:100%;margin:0;background:#0b0b0b;color:#e5e7eb;font:14px -apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;display:flex;align-items:center;justify-content:center;}
-      .box{display:flex;gap:10px;align-items:center;padding:12px 16px;border:1px solid #1f2937;border-radius:10px;background:#111827}
-      .dot{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 1.2s ease-in-out infinite;}
-      @keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
-    </style></head><body><div class="box"><div class="dot"></div><div>${msg}</div></div></body></html>`
+      html,body{height:100%;margin:0;background:#0b0b0b;color:#e5e7eb;font:14px -apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;}
+      .box{display:flex;flex-direction:column;gap:10px;padding:20px 24px;border:1px solid #1f2937;border-radius:10px;background:#111827;min-width:280px;}
+      .bar{height:4px;background:#1f2937;border-radius:2px;overflow:hidden;}
+      .fill{height:100%;background:#22c55e;border-radius:2px;transition:width .15s ease;}
+    </style></head><body><div class="box"><div>${msg}</div><div class="bar"><div class="fill" id="fill" style="width:0%"></div></div></div><script>
+      (function(){var f=document.getElementById('fill');if(f&&window.electronAPI&&window.electronAPI.onSplashProgress)window.electronAPI.onSplashProgress(function(d){f.style.width=d.pct+'%';var m=f.parentElement.previousElementSibling;if(m)m.textContent=d.msg||'';});})();
+    </script></body></html>`
     await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
   }
 
   if (app.isPackaged) {
     await loadSplash()
+    sendProgress(0, 'Starting MangoCT…')
+    if (process.platform === 'darwin') {
+      try {
+        sendProgress(3, 'Preparing…')
+        const appBundlePath = path.dirname(path.dirname(path.dirname(app.getPath('exe'))))
+        execSync(`xattr -cr "${appBundlePath}"`, { stdio: 'ignore' })
+      } catch (_) { }
+      try {
+        sendProgress(5, 'Checking port…')
+        execSync('lsof -ti:8000 | xargs kill -9 2>/dev/null || true', { stdio: 'ignore' })
+        await new Promise((r) => setTimeout(r, 500))
+      } catch (_) { }
+    }
+    sendProgress(10, 'Starting backend…')
     const backendPath = path.join(process.resourcesPath, 'ct-viewer-backend')
     const logPath = path.join(app.getPath('userData'), 'backend.log')
     const logStream = fs.createWriteStream(logPath, { flags: 'a' })
     let backendExitedBeforeReady = false
     let exitCode = null
     let exitSignal = null
+    const backendEnv = { ...process.env, MANGOCT_LOG_PATH: logPath }
     backendProc = spawn(backendPath, [], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      env: backendEnv,
     })
     if (backendProc.stdout) {
       backendProc.stdout.on('data', (buf) => appendLog(logStream, buf))
@@ -169,7 +197,14 @@ async function createWindow() {
       backendProc = null
     })
     try {
-      await waitForBackend('http://127.0.0.1:8000/health', 20000)
+      await waitForBackend('http://127.0.0.1:8000/health', 20000, sendProgress)
+      sendProgress(85, 'Loading app…')
+      const outDir = path.join(app.getAppPath(), 'frontend', 'out')
+      const { server, port } = await startStaticServer(outDir)
+      staticServer = server
+      sendProgress(95, 'Almost ready…')
+      await mainWindow.loadURL(`http://127.0.0.1:${port}`)
+      sendProgress(100, 'Ready')
     } catch (err) {
       if (backendProc) {
         backendProc.kill()
@@ -177,7 +212,13 @@ async function createWindow() {
       }
       logStream.end()
       const logSnippet = readLastLines(logPath, 15)
-      const workaround = 'If this app was downloaded or copied, macOS may block the backend. In Terminal run:\n  xattr -cr "/Applications/MangoCT.app"'
+      const appBundlePath = process.platform === 'darwin'
+        ? path.dirname(path.dirname(path.dirname(app.getPath('exe'))))
+        : '/Applications/MangoCT.app'
+      const firstTimeHint = process.platform === 'darwin'
+        ? 'If this is your first time opening, try right-click → Open, then run the app again.\n\n'
+        : ''
+      const workaround = `${firstTimeHint}If this app was downloaded or copied, macOS may block the backend. In Terminal run:\n  xattr -cr "${appBundlePath}"`
       const msg = [
         `Log: ${logPath}`,
         logSnippet ? `\nLast log lines:\n${logSnippet}` : '',
@@ -187,10 +228,6 @@ async function createWindow() {
       await loadSplash('Backend failed to start. See backend.log in the app data folder.')
       dialog.showErrorBox('Backend Error', msg)
     }
-    const outDir = path.join(app.getAppPath(), 'frontend', 'out')
-    const { server, port } = await startStaticServer(outDir)
-    staticServer = server
-    await mainWindow.loadURL(`http://127.0.0.1:${port}`)
   } else {
     await loadSplash('Waiting for dev server…')
     try {
@@ -224,10 +261,12 @@ app.on('window-all-closed', () => {
     staticServer = null
   }
   if (backendProc) {
-    backendProc.kill()
+    backendProc.kill('SIGKILL')
     backendProc = null
+    setTimeout(() => app.quit(), 400)
+  } else {
+    app.quit()
   }
-  app.quit()
 })
 
 app.on('activate', () => {

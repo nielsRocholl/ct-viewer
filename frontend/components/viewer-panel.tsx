@@ -12,6 +12,7 @@ import {
     usePairMetadata,
     useAddSegmentToPair,
     useUploadVolume,
+    useDice,
 } from '@/lib/api-hooks'
 import { CanvasRenderer, type CanvasRendererHandle } from './canvas-renderer'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
@@ -21,6 +22,7 @@ import { Slider } from './ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
+import { Input } from './ui/input'
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -28,7 +30,7 @@ import {
     DropdownMenuTrigger,
 } from './ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
-import { ZoomIn, ZoomOut, RotateCcw, Palette, Download, Plus, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { ZoomIn, ZoomOut, RotateCcw, Palette, Download, Plus, Trash2, ChevronDown, ChevronUp, Crosshair } from 'lucide-react'
 import {
     AXIS_MAP,
     convertIndexToPhysical,
@@ -36,14 +38,20 @@ import {
     physicalToIndexFromMetadata,
 } from '@/lib/synchronization'
 import { fetchCTSlice, fetchSegmentationSlice, fetchWindowFromRoi } from '@/lib/api-client'
-import { downloadCanvasAsJpeg } from '@/lib/utils'
+import { cn, downloadCanvasAsJpeg } from '@/lib/utils'
 import { VolumeInfoCard } from './volume-info-card'
 import { toast } from 'sonner'
-import { generateDefaultColorMap, DEFAULT_LABEL_COLOR } from '@/lib/color-utils'
+import {
+    createColorMapFromPalette,
+    generateDistinctColor,
+    DEFAULT_LABEL_COLOR,
+} from '@/lib/color-utils'
 import type { OverlayLayerSpec } from './canvas-renderer'
 import { computePairHealth } from '@/lib/health'
 import { WINDOW_PRESETS } from '@/lib/window-presets'
+import { useViewerCanvasWheel } from '@/lib/use-viewer-canvas-wheel'
 
+const SEG_LIST_COLLAPSE_AT = 4
 const WINDOW_ROI_RADIUS_MM = 20
 const WINDOW_SMOOTH_NEW = 0.7
 
@@ -81,6 +89,8 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     const updateSegVisible = useViewerStore((state) => state.updateSegVisible)
     const updateSegMode = useViewerStore((state) => state.updateSegMode)
     const updateSegColorMap = useViewerStore((state) => state.updateSegColorMap)
+    const updateSegName = useViewerStore((state) => state.updateSegName)
+    const updateSegRole = useViewerStore((state) => state.updateSegRole)
     const resetPairView = useViewerStore((state) => state.resetPairView)
     const setGlobalSlicePhysical = useViewerStore((state) => state.setGlobalSlicePhysical)
     const setGlobalSliceNormalized = useViewerStore((state) => state.setGlobalSliceNormalized)
@@ -94,15 +104,25 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     const [presetId, setPresetId] = useState<string | null>(null)
     const [clickedXyz, setClickedXyz] = useState<{ x: number; y: number; z: number } | null>(null)
     const [clickedVoxel, setClickedVoxel] = useState<{ x: number; y: number; z: number } | null>(null)
+    const [goToBarOpen, setGoToBarOpen] = useState(false)
+    const [goToX, setGoToX] = useState('')
+    const [goToY, setGoToY] = useState('')
+    const [goToZ, setGoToZ] = useState('')
+    const [goToMode, setGoToMode] = useState<'voxel' | 'physical'>('voxel')
+    const [markerPosition, setMarkerPosition] = useState<{ x: number; y: number } | null>(null)
     const canvasRendererRef = useRef<CanvasRendererHandle>(null)
     const frameRef = useRef<HTMLDivElement>(null)
     const canvasContainerRef = useRef<HTMLDivElement>(null)
+    const sliceWheelRef = useRef<HTMLDivElement>(null)
     const [frameSize, setFrameSize] = useState({ width: 512, height: 512 })
     const lastSizeRef = useRef({ width: 512, height: 512 })
     const [canvasSize, setCanvasSize] = useState({ width: 512, height: 512 })
     const [isUpdatingFromSync, setIsUpdatingFromSync] = useState(false)
     const [volumeInfoOpen, setVolumeInfoOpen] = useState(false)
     const addMaskInputRef = useRef<HTMLInputElement>(null)
+    const markerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const slicePrefetchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const slicePrefetchGenRef = useRef(0)
 
     const [localWindowLevel, setLocalWindowLevel] = useState(pair?.windowLevel ?? 40)
     const [localWindowWidth, setLocalWindowWidth] = useState(pair?.windowWidth ?? 400)
@@ -223,6 +243,11 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
 
     const orientation = pair?.orientation ?? 'axial'
     const segVolumes = useMemo(() => (pair ? getPairSegVolumes(pair) : []), [pair])
+    const manySegs = segVolumes.length >= SEG_LIST_COLLAPSE_AT
+    const [maskPanelOpen, setMaskPanelOpen] = useState(!manySegs)
+    useEffect(() => {
+        setMaskPanelOpen(!manySegs)
+    }, [manySegs, pairId])
     const baseSegParams = pair
         ? {
             slice_index: pair.currentSliceIndex,
@@ -238,6 +263,10 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
             mode: seg.mode ?? 'filled',
         }))
         : []
+
+    const gtVolumeId = segVolumes.find((s) => s.role === 'gt')?.volumeId ?? null
+    const predVolumeId = segVolumes.find((s) => s.role === 'pred')?.volumeId ?? null
+    const { data: diceData } = useDice(gtVolumeId, predVolumeId)
 
     const { data: ctSliceUrl, error: ctSliceError } = useCTSlice(
         pair
@@ -518,22 +547,102 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         [pairId, pair, segVolumes, updateSegColorMap]
     )
 
+    const handleSegLabelColorChange = useCallback(
+        (segIndex: number, labelValue: number, color: string) => {
+            if (pair && segVolumes[segIndex]) {
+                const newColorMap = new Map(segVolumes[segIndex].colorMap)
+                newColorMap.set(labelValue, color)
+                updateSegColorMap(pairId, segIndex, newColorMap)
+            }
+        },
+        [pairId, pair, segVolumes, updateSegColorMap]
+    )
+
+    const handleGoToSearch = useCallback(async () => {
+        if (!pair || !pairMetadata?.ct_metadata) return
+        const meta = pairMetadata.ct_metadata
+        const ori = pair.orientation ?? 'axial'
+        const dims = meta.dimensions
+        const [ox, oy, oz] = meta.origin
+        const [sx, sy, sz] = meta.spacing
+
+        let i: number, j: number, k: number
+        if (goToMode === 'voxel') {
+            i = Math.round(parseFloat(goToX) || 0)
+            j = Math.round(parseFloat(goToY) || 0)
+            k = Math.round(parseFloat(goToZ) || 0)
+        } else {
+            const px = parseFloat(goToX) || 0
+            const py = parseFloat(goToY) || 0
+            const pz = parseFloat(goToZ) || 0
+            i = Math.round((px - ox) / sx)
+            j = Math.round((py - oy) / sy)
+            k = Math.round((pz - oz) / sz)
+        }
+
+        const inBounds =
+            i >= 0 && i < dims[0] && j >= 0 && j < dims[1] && k >= 0 && k < dims[2]
+        if (!inBounds) {
+            toast.error('Coordinates out of bounds', {
+                description: `Valid range: X [0, ${dims[0] - 1}], Y [0, ${dims[1] - 1}], Z [0, ${dims[2] - 1}]`,
+            })
+            return
+        }
+
+        let sliceIndex: number
+        let markerImgX: number
+        let markerImgY: number
+        if (ori === 'axial') {
+            sliceIndex = Math.max(0, Math.min(k, dims[2] - 1))
+            markerImgX = Math.max(0, Math.min(i, dims[0] - 1))
+            markerImgY = Math.max(0, Math.min(j, dims[1] - 1))
+        } else if (ori === 'sagittal') {
+            sliceIndex = Math.max(0, Math.min(i, dims[0] - 1))
+            markerImgX = Math.max(0, Math.min(j, dims[1] - 1))
+            markerImgY = Math.max(0, Math.min(k, dims[2] - 1))
+        } else {
+            sliceIndex = Math.max(0, Math.min(j, dims[1] - 1))
+            markerImgX = Math.max(0, Math.min(i, dims[0] - 1))
+            markerImgY = Math.max(0, Math.min(k, dims[2] - 1))
+        }
+
+        handleSliceChange([sliceIndex])
+        if (markerTimeoutRef.current) clearTimeout(markerTimeoutRef.current)
+        setMarkerPosition({ x: markerImgX, y: markerImgY })
+        markerTimeoutRef.current = setTimeout(() => {
+            setMarkerPosition(null)
+            markerTimeoutRef.current = null
+        }, 3000)
+    }, [pair, pairMetadata?.ct_metadata, pairId, goToMode, goToX, goToY, goToZ, handleSliceChange])
+
     const handleAddMask = useCallback(
         async (e: React.ChangeEvent<HTMLInputElement>) => {
-            const file = e.target.files?.[0]
+            const files = Array.from(e.target.files ?? [])
             e.target.value = ''
-            if (!file || !pair || segVolumes.length >= 10) return
+            if (files.length === 0 || !pair) return
+            const toAdd = Math.min(files.length, 20 - segVolumes.length)
+            if (toAdd <= 0) return
             try {
-                const vol = await uploadVolumeMutation.mutateAsync(file)
-                const updated = await addSegmentMutation.mutateAsync({
-                    pairId,
-                    request: { seg_volume_id: vol.volume_id, auto_resample: true },
-                })
-                const last = updated.seg_metadatas?.length
-                    ? updated.seg_metadatas[updated.seg_metadatas.length - 1]
-                    : vol
-                addSegToPair(pairId, last.volume_id)
-                toast.success('Mask added')
+                for (let i = 0; i < toAdd; i++) {
+                    const file = files[i]
+                    const vol = await uploadVolumeMutation.mutateAsync(file)
+                    const updated = await addSegmentMutation.mutateAsync({
+                        pairId,
+                        request: { seg_volume_id: vol.volume_id, auto_resample: true },
+                    })
+                    const lastMeta = updated.seg_metadatas?.length
+                        ? updated.seg_metadatas[updated.seg_metadatas.length - 1]
+                        : null
+                    const volumeId = lastMeta?.volume_id ?? vol.volume_id
+                    const lastStats = updated.seg_stats?.[updated.seg_stats.length - 1]
+                    const labelValues = lastStats?.label_values ?? []
+                    const colorMap =
+                        labelValues.length > 1
+                            ? createColorMapFromPalette(labelValues, 'colorblind', segVolumes.length + i)
+                            : new Map([[1, generateDistinctColor(segVolumes.length + i)]])
+                    addSegToPair(pairId, volumeId, colorMap)
+                }
+                toast.success(toAdd === 1 ? 'Mask added' : `${toAdd} masks added`)
             } catch (err) {
                 toast.error('Failed to add mask', { description: err instanceof Error ? err.message : undefined })
             }
@@ -562,6 +671,20 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     const dims = pairMetadata?.ct_metadata?.dimensions
     const sp = pairMetadata?.ct_metadata?.spacing
     const maxSliceIndex = dims?.[axis] ?? 100
+    const maxSliceIdxInclusive = maxSliceIndex - 1
+
+    useViewerCanvasWheel(
+        sliceWheelRef,
+        Boolean(pair),
+        maxSliceIdxInclusive,
+        () => useViewerStore.getState().pairs.get(pairId)?.currentSliceIndex ?? 0,
+        (n) => {
+            void handleSliceChange([n])
+        },
+        () => useViewerStore.getState().pairs.get(pairId)?.zoom ?? 1,
+        (z) => updatePairZoom(pairId, z)
+    )
+
     const axialAspect = (() => {
         if (!dims) return 1
         const sx = (sp?.[0] ?? 1) * dims[0]
@@ -619,27 +742,63 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     }, [pair, pairMetadata, pairId, updatePairSlice, maxSliceIndex])
 
     useEffect(() => {
-        if (!pair) return
-        const maxIdx = maxSliceIndex - 1
-        if (maxIdx < 0) return
-        const base = {
-            volume_id: pair.ctVolumeId,
-            orientation: pair.orientation ?? 'axial',
-            window_level: pair.windowLevel,
-            window_width: pair.windowWidth,
-            format: 'png' as const,
+        if (slicePrefetchDebounceRef.current) {
+            clearTimeout(slicePrefetchDebounceRef.current)
+            slicePrefetchDebounceRef.current = null
         }
-        const idxs = [pair.currentSliceIndex - 1, pair.currentSliceIndex + 1]
-        idxs.forEach((sliceIndex) => {
-            if (sliceIndex < 0 || sliceIndex > maxIdx) return
-            const params = { ...base, slice_index: sliceIndex }
-            queryClient.prefetchQuery({
-                queryKey: queryKeys.ctSlice(params),
-                queryFn: () => fetchCTSlice(params),
-                staleTime: 5 * 60 * 1000,
-                gcTime: 10 * 60 * 1000,
+        slicePrefetchGenRef.current += 1
+        const gen = slicePrefetchGenRef.current
+        slicePrefetchDebounceRef.current = setTimeout(() => {
+            slicePrefetchDebounceRef.current = null
+            if (gen !== slicePrefetchGenRef.current) return
+            if (!pair) return
+            const maxIdx = maxSliceIndex - 1
+            if (maxIdx < 0) return
+            const ori = pair.orientation ?? 'axial'
+            const base = {
+                volume_id: pair.ctVolumeId,
+                orientation: ori,
+                window_level: pair.windowLevel,
+                window_width: pair.windowWidth,
+                format: 'png' as const,
+            }
+            const idxs = [pair.currentSliceIndex - 1, pair.currentSliceIndex + 1]
+            idxs.forEach((sliceIndex) => {
+                if (sliceIndex < 0 || sliceIndex > maxIdx) return
+                const params = { ...base, slice_index: sliceIndex }
+                queryClient.prefetchQuery({
+                    queryKey: queryKeys.ctSlice(params),
+                    queryFn: () => fetchCTSlice(params),
+                    staleTime: 5 * 60 * 1000,
+                    gcTime: 10 * 60 * 1000,
+                })
             })
-        })
+            if (segVolumes.length === 0) return
+            idxs.forEach((slice_index) => {
+                if (slice_index < 0 || slice_index > maxIdx) return
+                segVolumes.forEach((seg) => {
+                    const params = {
+                        volume_id: seg.volumeId,
+                        slice_index,
+                        orientation: ori,
+                        mode: seg.mode ?? 'filled',
+                        format: 'png' as const,
+                    }
+                    queryClient.prefetchQuery({
+                        queryKey: queryKeys.segSlice(params),
+                        queryFn: () => fetchSegmentationSlice(params),
+                        staleTime: 5 * 60 * 1000,
+                        gcTime: 10 * 60 * 1000,
+                    })
+                })
+            })
+        }, 140)
+        return () => {
+            if (slicePrefetchDebounceRef.current) {
+                clearTimeout(slicePrefetchDebounceRef.current)
+                slicePrefetchDebounceRef.current = null
+            }
+        }
     }, [
         pair,
         pair?.currentSliceIndex,
@@ -647,34 +806,24 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         pair?.windowLevel,
         pair?.windowWidth,
         pair?.ctVolumeId,
+        segVolumes,
         maxSliceIndex,
         queryClient,
     ])
 
     useEffect(() => {
-        if (!pair || segVolumes.length === 0) return
-        const maxIdx = maxSliceIndex - 1
-        if (maxIdx < 0) return
-        const idxs = [pair.currentSliceIndex - 1, pair.currentSliceIndex + 1]
-        idxs.forEach((slice_index) => {
-            if (slice_index < 0 || slice_index > maxIdx) return
-            segVolumes.forEach((seg) => {
-                const params = {
-                    volume_id: seg.volumeId,
-                    slice_index,
-                    orientation: pair.orientation ?? 'axial',
-                    mode: seg.mode ?? 'filled',
-                    format: 'png' as const,
-                }
-                queryClient.prefetchQuery({
-                    queryKey: queryKeys.segSlice(params),
-                    queryFn: () => fetchSegmentationSlice(params),
-                    staleTime: 5 * 60 * 1000,
-                    gcTime: 10 * 60 * 1000,
-                })
-            })
+        if (!pair || !pairMetadata?.seg_stats || segVolumes.length === 0) return
+        pairMetadata.seg_stats.forEach((stats, i) => {
+            const labelValues = stats.label_values ?? []
+            if (labelValues.length <= 1) return
+            const seg = segVolumes[i]
+            if (!seg) return
+            const keys = Array.from(seg.colorMap.keys())
+            if (keys.length > 1) return
+            const colorMap = createColorMapFromPalette(labelValues, 'colorblind', i)
+            updateSegColorMap(pairId, i, colorMap)
         })
-    }, [pair, segVolumes, maxSliceIndex, queryClient])
+    }, [pairId, pair, pairMetadata?.seg_stats, segVolumes, updateSegColorMap])
 
     const orientationLabel = { axial: 'Axial (Z)', sagittal: 'Sagittal (X)', coronal: 'Coronal (Y)' } as const
     const health = useMemo(
@@ -727,12 +876,12 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     }
 
     return (
-        <Card className="w-full">
+        <Card className="w-full min-w-0 overflow-hidden">
             <CardHeader>
                 <CardTitle className="text-sm font-medium">Pair {pairId.slice(0, 8)}</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4">
-                <div className="mx-auto w-full max-w-[512px] space-y-4">
+            <CardContent className="min-w-0 space-y-4 overflow-x-hidden">
+                <div className="mx-auto w-full min-w-0 max-w-[512px] space-y-4">
                     {pairMetadata && (
                         <div className="flex items-center gap-2">
                             <Popover open={volumeInfoOpen} onOpenChange={setVolumeInfoOpen}>
@@ -779,6 +928,11 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                                                             <div>Components: {s.stats ? s.stats.component_count : '—'}</div>
                                                             <div>Multi‑label: {s.stats ? (s.stats.multi_label ? 'Yes' : 'No') : '—'}</div>
                                                             <div>Labels: {s.stats ? s.stats.nonzero_label_count : '—'}</div>
+                                                            {s.stats?.label_values && s.stats.label_values.length > 0 && (
+                                                                <div className="col-span-2">
+                                                                    Values: {s.stats.label_values.join(', ')}
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     </div>
                                                 ))}
@@ -860,6 +1014,7 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                             style={{ width: frameSize.width, height: frameSize.height }}
                         >
                             <div
+                                ref={sliceWheelRef}
                                 className="absolute inset-0 cursor-move"
                                 onMouseDown={handleMouseDown}
                                 onMouseMove={handleMouseMove}
@@ -881,6 +1036,7 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                                     windowWidth={pair.windowWidth}
                                     width={canvasSize.width}
                                     height={canvasSize.height}
+                                    markerPosition={markerPosition}
                                 />
                                 {clickedXyz && clickedVoxel && (
                                     <div className="absolute top-2 right-2 text-xs font-mono bg-black/70 text-white px-2 py-1 rounded pointer-events-none space-y-0.5">
@@ -910,19 +1066,110 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
 
                 {controlsExpanded && (
                     <>
+                        {/* Go to coordinates */}
+                        <div className="space-y-2">
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="w-full gap-2"
+                                onClick={() => setGoToBarOpen((o) => !o)}
+                            >
+                                <Crosshair className="h-4 w-4" />
+                                Go to coordinates
+                            </Button>
+                            {goToBarOpen && (
+                                <div className="space-y-2 rounded-lg border bg-muted/30 p-2">
+                                    <div
+                                        className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-muted p-0.5 text-muted-foreground"
+                                        role="tablist"
+                                        aria-label="Coordinate mode"
+                                    >
+                                        <button
+                                            type="button"
+                                            role="tab"
+                                            aria-selected={goToMode === 'voxel'}
+                                            onClick={() => setGoToMode('voxel')}
+                                            className={cn(
+                                                'inline-flex flex-1 items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-[11px] font-medium transition-all sm:text-xs',
+                                                'focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                                                goToMode === 'voxel'
+                                                    ? 'bg-background text-foreground shadow'
+                                                    : 'text-muted-foreground hover:text-foreground/80'
+                                            )}
+                                        >
+                                            Voxel
+                                        </button>
+                                        <button
+                                            type="button"
+                                            role="tab"
+                                            aria-selected={goToMode === 'physical'}
+                                            onClick={() => setGoToMode('physical')}
+                                            className={cn(
+                                                'inline-flex flex-1 items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-[11px] font-medium transition-all sm:text-xs',
+                                                'focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                                                goToMode === 'physical'
+                                                    ? 'bg-background text-foreground shadow'
+                                                    : 'text-muted-foreground hover:text-foreground/80'
+                                            )}
+                                        >
+                                            Physical (mm)
+                                        </button>
+                                    </div>
+                                    <div className="flex gap-1">
+                                        <Input
+                                            placeholder="X"
+                                            value={goToX}
+                                            onChange={(e) => setGoToX(e.target.value)}
+                                            className="h-8 text-xs"
+                                        />
+                                        <Input
+                                            placeholder="Y"
+                                            value={goToY}
+                                            onChange={(e) => setGoToY(e.target.value)}
+                                            className="h-8 text-xs"
+                                        />
+                                        <Input
+                                            placeholder="Z"
+                                            value={goToZ}
+                                            onChange={(e) => setGoToZ(e.target.value)}
+                                            className="h-8 text-xs"
+                                        />
+                                    </div>
+                                    <Button
+                                        size="sm"
+                                        className="w-full"
+                                        onClick={() => handleGoToSearch()}
+                                    >
+                                        Find
+                                    </Button>
+                                </div>
+                            )}
+                        </div>
+
                         {/* Viewing direction toggle */}
                         <div className="flex min-h-9 items-center justify-center">
-                            <div className="inline-flex min-w-[14rem] rounded-xl border border-input bg-muted/30 p-0.5" role="group" aria-label="View orientation">
+                            <div
+                                className="grid h-8 w-full max-w-md grid-cols-3 items-center justify-center gap-0.5 rounded-lg bg-muted p-0.5 text-muted-foreground"
+                                role="tablist"
+                                aria-label="View orientation"
+                            >
                                 {(['axial', 'sagittal', 'coronal'] as const).map((ori) => (
-                                    <Button
+                                    <button
                                         key={ori}
-                                        variant={pair.orientation === ori ? 'default' : 'ghost'}
-                                        size="sm"
-                                        className="h-7 flex-1 rounded-lg px-3 text-xs"
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={pair.orientation === ori}
                                         onClick={() => updatePairOrientation(pairId, ori)}
+                                        className={cn(
+                                            'inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-[11px] font-medium transition-all sm:text-xs',
+                                            'focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                                            pair.orientation === ori
+                                                ? 'bg-background text-foreground shadow'
+                                                : 'text-muted-foreground hover:text-foreground/80'
+                                        )}
                                     >
                                         {orientationLabel[ori]}
-                                    </Button>
+                                    </button>
                                 ))}
                             </div>
                         </div>
@@ -1031,87 +1278,226 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                         </div>
 
                         {/* Masks / Overlay */}
-                        <div className="space-y-3 border-t pt-3">
-                            {segVolumes.length > 1 && (
-                                <div className="flex flex-wrap items-center gap-2 text-xs">
-                                    {segVolumes.map((seg, i) => (
-                                        <span key={i} className="flex items-center gap-1.5">
-                                            <span
-                                                className="h-2.5 w-2.5 rounded-sm border border-border shrink-0"
-                                                style={{ backgroundColor: seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR }}
-                                                aria-hidden
-                                            />
-                                            Mask {i + 1}
-                                        </span>
-                                    ))}
+                        <div className="min-w-0 space-y-3 border-t pt-3">
+                            {gtVolumeId && predVolumeId && diceData && (
+                                <div className="flex items-center gap-2 text-xs">
+                                    <span className="text-muted-foreground">DICE:</span>
+                                    <Badge variant="outline" className="font-mono">
+                                        {diceData.dice.toFixed(4)}
+                                    </Badge>
                                 </div>
                             )}
-                            {segVolumes.map((seg, i) => (
-                                <div key={i} className="flex items-center gap-2">
-                                    <span
-                                        className="h-3 w-3 rounded border border-border shrink-0"
-                                        style={{ backgroundColor: seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR }}
-                                        aria-hidden
-                                    />
-                                    <Label className="text-xs shrink-0 min-w-[7rem] whitespace-nowrap">
-                                        {seg.name || `Mask ${i + 1}`}
-                                    </Label>
-                                    {seg.role && (
-                                        <Badge
-                                            variant={seg.role === 'pred' ? 'secondary' : 'default'}
-                                            className="h-5 rounded-sm px-1.5 text-[10px]"
-                                        >
-                                            {seg.role === 'pred' ? 'Pred' : 'GT'}
-                                        </Badge>
-                                    )}
-                                    <Switch
-                                        checked={seg.visible !== false}
-                                        onCheckedChange={(v) => updateSegVisible(pairId, i, v)}
-                                    />
-                                    <DropdownMenu>
-                                        <DropdownMenuTrigger asChild>
-                                            <Button variant="outline" size="sm">
-                                                {(seg.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
-                                            </Button>
-                                        </DropdownMenuTrigger>
-                                        <DropdownMenuContent>
-                                            <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'filled')}>Filled</DropdownMenuItem>
-                                            <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'boundary')}>Boundary</DropdownMenuItem>
-                                        </DropdownMenuContent>
-                                    </DropdownMenu>
-                                    <Popover>
-                                        <PopoverTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                size="icon"
-                                                className="h-8 w-8 shrink-0"
-                                                onClick={() => setSelectedColor(seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR)}
-                                            >
-                                                <Palette className="h-4 w-4" />
-                                            </Button>
-                                        </PopoverTrigger>
-                                        <PopoverContent className="w-48">
-                                            <input
-                                                type="color"
-                                                value={selectedColor}
-                                                onChange={(e) => handleColorChange(e.target.value, i)}
-                                                className="w-full h-8 cursor-pointer rounded"
-                                            />
-                                        </PopoverContent>
-                                    </Popover>
-                                    {segVolumes.length > 1 && (
-                                        <Button
-                                            variant="ghost"
-                                            size="icon"
-                                            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
-                                            onClick={() => removeSegFromPair(pairId, i)}
-                                            aria-label={`Remove mask ${i + 1}`}
-                                        >
-                                            <Trash2 className="h-4 w-4" />
-                                        </Button>
-                                    )}
+                            {segVolumes.length > 1 && (
+                                <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                                    {segVolumes.map((seg, i) => {
+                                        const stats = pairMetadata?.seg_stats?.[i]
+                                        const labelValues = stats?.label_values ?? []
+                                        const multiLabel = labelValues.length > 1
+                                        const colors = multiLabel
+                                            ? labelValues.map((lv) => seg.colorMap.get(lv) ?? DEFAULT_LABEL_COLOR)
+                                            : [seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR]
+                                        return (
+                                            <span key={i} className="flex max-w-full min-w-0 items-center gap-1.5">
+                                                <div className="flex max-w-[4.5rem] gap-0.5 overflow-x-auto [scrollbar-width:thin]">
+                                                    {colors.map((c, j) => (
+                                                        <span
+                                                            key={j}
+                                                            className="h-2.5 w-2.5 shrink-0 rounded-sm border border-border"
+                                                            style={{ backgroundColor: c }}
+                                                            aria-hidden
+                                                        />
+                                                    ))}
+                                                </div>
+                                                <span className="shrink-0">Mask {i + 1}</span>
+                                            </span>
+                                        )
+                                    })}
                                 </div>
-                            ))}
+                            )}
+                            {manySegs && (
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 w-full justify-between gap-2 px-2"
+                                    onClick={() => setMaskPanelOpen((o) => !o)}
+                                    aria-expanded={maskPanelOpen}
+                                >
+                                    <span className="truncate text-xs">Masks ({segVolumes.length})</span>
+                                    {maskPanelOpen ? (
+                                        <ChevronUp className="h-4 w-4 shrink-0" />
+                                    ) : (
+                                        <ChevronDown className="h-4 w-4 shrink-0" />
+                                    )}
+                                </Button>
+                            )}
+                            <div
+                                className={cn(
+                                    'min-w-0 space-y-3',
+                                    manySegs && !maskPanelOpen && 'hidden'
+                                )}
+                            >
+                            {segVolumes.map((seg, i) => {
+                                const stats = pairMetadata?.seg_stats?.[i]
+                                const labelValues = stats?.label_values ?? []
+                                const multiLabel = labelValues.length > 1
+                                const colors = multiLabel
+                                    ? labelValues.map((lv) => seg.colorMap.get(lv) ?? DEFAULT_LABEL_COLOR)
+                                    : [seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR]
+                                return (
+                                    <div
+                                        key={i}
+                                        className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-2"
+                                    >
+                                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                                            <div
+                                                className="flex max-w-[5.5rem] shrink-0 gap-0.5 overflow-x-auto py-0.5 [scrollbar-width:thin]"
+                                                title={colors.length > 5 ? `${colors.length} labels` : undefined}
+                                            >
+                                                {colors.map((color, idx) => (
+                                                    <span
+                                                        key={idx}
+                                                        className="h-3 w-3 shrink-0 rounded border border-border"
+                                                        style={{ backgroundColor: color }}
+                                                        aria-hidden
+                                                    />
+                                                ))}
+                                            </div>
+                                            <Input
+                                                value={seg.name ?? ''}
+                                                onChange={(e) => updateSegName(pairId, i, e.target.value)}
+                                                placeholder={`Mask ${i + 1}`}
+                                                className="h-7 min-w-0 flex-1 border-0 bg-transparent px-1 text-xs shadow-none focus-visible:ring-1"
+                                            />
+                                        </div>
+                                        <div className="flex min-w-0 flex-wrap items-center gap-1 sm:shrink-0">
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                <Button
+                                                    type="button"
+                                                    variant={seg.role === 'gt' ? 'default' : 'outline'}
+                                                    size="sm"
+                                                    className="h-5 px-1.5 text-[10px]"
+                                                    onClick={() => updateSegRole(pairId, i, seg.role === 'gt' ? undefined : 'gt')}
+                                                >
+                                                    GT
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    variant={seg.role === 'pred' ? 'secondary' : 'outline'}
+                                                    size="sm"
+                                                    className="h-5 px-1.5 text-[10px]"
+                                                    onClick={() => updateSegRole(pairId, i, seg.role === 'pred' ? undefined : 'pred')}
+                                                >
+                                                    Pred
+                                                </Button>
+                                            </div>
+                                            <Switch
+                                                checked={seg.visible !== false}
+                                                onCheckedChange={(v) => updateSegVisible(pairId, i, v)}
+                                            />
+                                            <DropdownMenu>
+                                                <DropdownMenuTrigger asChild>
+                                                    <Button variant="outline" size="sm">
+                                                        {(seg.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
+                                                    </Button>
+                                                </DropdownMenuTrigger>
+                                                <DropdownMenuContent>
+                                                    <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'filled')}>
+                                                        Filled
+                                                    </DropdownMenuItem>
+                                                    <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'boundary')}>
+                                                        Boundary
+                                                    </DropdownMenuItem>
+                                                </DropdownMenuContent>
+                                            </DropdownMenu>
+                                            <Popover>
+                                                <PopoverTrigger asChild>
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        className="h-8 w-8 shrink-0"
+                                                        onClick={() =>
+                                                            setSelectedColor(
+                                                                multiLabel
+                                                                    ? (seg.colorMap.get(labelValues[0]) ?? DEFAULT_LABEL_COLOR)
+                                                                    : (seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR)
+                                                            )
+                                                        }
+                                                    >
+                                                        <Palette className="h-4 w-4" />
+                                                    </Button>
+                                                </PopoverTrigger>
+                                                <PopoverContent className="w-52">
+                                                    {multiLabel ? (
+                                                        <div className="space-y-2">
+                                                            <div className="text-xs font-medium text-muted-foreground">
+                                                                Label colors
+                                                            </div>
+                                                            <div className="max-h-48 space-y-1.5 overflow-y-auto">
+                                                                {labelValues
+                                                                    .slice()
+                                                                    .sort((a, b) => a - b)
+                                                                    .map((labelVal) => (
+                                                                        <div
+                                                                            key={labelVal}
+                                                                            className="flex items-center gap-2"
+                                                                        >
+                                                                            <span
+                                                                                className="h-4 w-4 shrink-0 rounded border border-border"
+                                                                                style={{
+                                                                                    backgroundColor:
+                                                                                        seg.colorMap.get(labelVal) ??
+                                                                                        DEFAULT_LABEL_COLOR,
+                                                                                }}
+                                                                            />
+                                                                            <span className="w-6 shrink-0 text-xs tabular-nums">
+                                                                                {labelVal}
+                                                                            </span>
+                                                                            <input
+                                                                                type="color"
+                                                                                value={
+                                                                                    seg.colorMap.get(labelVal) ??
+                                                                                    DEFAULT_LABEL_COLOR
+                                                                                }
+                                                                                onChange={(e) =>
+                                                                                    handleSegLabelColorChange(
+                                                                                        i,
+                                                                                        labelVal,
+                                                                                        e.target.value
+                                                                                    )
+                                                                                }
+                                                                                className="h-6 min-w-0 flex-1 cursor-pointer rounded"
+                                                                            />
+                                                                        </div>
+                                                                    ))}
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        <input
+                                                            type="color"
+                                                            value={selectedColor}
+                                                            onChange={(e) => handleColorChange(e.target.value, i)}
+                                                            className="h-8 w-full cursor-pointer rounded"
+                                                        />
+                                                    )}
+                                                </PopoverContent>
+                                            </Popover>
+                                            {segVolumes.length > 1 && (
+                                                <Button
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                                                    onClick={() => removeSegFromPair(pairId, i)}
+                                                    aria-label={`Remove mask ${i + 1}`}
+                                                >
+                                                    <Trash2 className="h-4 w-4" />
+                                                </Button>
+                                            )}
+                                        </div>
+                                    </div>
+                                )
+                            })}
+                            </div>
                             {segVolumes.length > 0 && (
                                 <div className="space-y-2">
                                     <Label className="text-xs">Opacity: {(pair.overlayOpacity * 100).toFixed(0)}%</Label>
@@ -1125,12 +1511,13 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                                     />
                                 </div>
                             )}
-                            {segVolumes.length < 10 && (
+                            {segVolumes.length < 20 && (
                                 <>
                                     <input
                                         ref={addMaskInputRef}
                                         type="file"
                                         accept=".nii,.gz,.mha,.mhd"
+                                        multiple
                                         className="hidden"
                                         onChange={handleAddMask}
                                     />

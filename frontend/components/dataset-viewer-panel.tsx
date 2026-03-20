@@ -3,7 +3,7 @@
 import { useCallback, useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useViewerStore, type DatasetCaseState } from '@/lib/store'
-import { queryKeys, useCTSlice, useSegmentationSlices, useVolumeMetadata, useVolumeMetadatas } from '@/lib/api-hooks'
+import { queryKeys, useCTSlice, useSegmentationSlices, useVolumeMetadata, useVolumeMetadatas, useDice } from '@/lib/api-hooks'
 import { CanvasRenderer, type CanvasRendererHandle } from './canvas-renderer'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { Badge } from './ui/badge'
@@ -12,8 +12,19 @@ import { Slider } from './ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
+import { Input } from './ui/input'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './ui/dropdown-menu'
-import { ZoomIn, ZoomOut, RotateCcw, Download, Palette } from 'lucide-react'
+import {
+    ZoomIn,
+    ZoomOut,
+    RotateCcw,
+    Download,
+    Palette,
+    ChevronLeft,
+    ChevronRight,
+    ChevronDown,
+    ChevronUp,
+} from 'lucide-react'
 import { AXIS_MAP } from '@/lib/synchronization'
 import {
     fetchCTSlice,
@@ -21,15 +32,23 @@ import {
     openDatasetCase,
     fetchWindowFromRoi,
     fetchFirstSliceWithMask,
+    fetchSliceForComponent,
     submitDatasetDecision,
 } from '@/lib/api-client'
 import { toast } from 'sonner'
-import { generateDistinctColor, DEFAULT_PRED_COLOR, createColorMapFromPalette } from '@/lib/color-utils'
-import { downloadCanvasAsJpeg } from '@/lib/utils'
+import {
+    generateDistinctColor,
+    DEFAULT_PRED_COLOR,
+    createColorMapFromPalette,
+    colorMapToRecord,
+    recordToColorMap,
+} from '@/lib/color-utils'
+import { cn, downloadCanvasAsJpeg } from '@/lib/utils'
 import { VolumeInfoCard } from './volume-info-card'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import { computePairHealth } from '@/lib/health'
 import { WINDOW_PRESETS } from '@/lib/window-presets'
+import { useViewerCanvasWheel } from '@/lib/use-viewer-canvas-wheel'
 
 const CLICK_THRESHOLD_PX = 6
 const WINDOW_ROI_RADIUS_MM = 20
@@ -39,6 +58,8 @@ const DEFAULT_WINDOW_WIDTH = 400
 const DEFAULT_ZOOM = 1
 const DEFAULT_PAN = { x: 0, y: 0 }
 const DEFAULT_OVERLAY_OPACITY = 0.5
+/** When segmentation count ≥ this, list is behind a collapse toggle by default. */
+const SEG_LIST_COLLAPSE_AT = 4
 
 const healthExplain = (label: string): string => {
     if (label.startsWith('Mask ')) return 'Mask metadata loaded and geometry matches CT.'
@@ -54,15 +75,34 @@ const healthExplain = (label: string): string => {
 type DatasetSeg = DatasetCaseState['segVolumes'][number]
 
 function mergeSegDisplay(prev: DatasetSeg[] | null | undefined, next: DatasetSeg[]): DatasetSeg[] {
-    return next.map((s, i) => ({
-        ...s,
-        color:
-            s.color ??
-            prev?.[i]?.color ??
-            (s.role === 'pred' ? DEFAULT_PRED_COLOR : generateDistinctColor(i, next.length)),
-        visible: s.visible ?? prev?.[i]?.visible ?? true,
-        mode: s.mode ?? prev?.[i]?.mode ?? 'filled',
-    }))
+    return next.map((s, i) => {
+        const prevSeg = prev?.[i]
+        const labelValues = s.labelValues ?? []
+        const multiLabel = labelValues.length > 1
+        let colorMap: Record<string, string> | undefined
+        if (multiLabel) {
+            const baseMap = createColorMapFromPalette(labelValues, 'colorblind', i)
+            const baseRecord = colorMapToRecord(baseMap)
+            const prevRecord = prevSeg?.colorMap ?? {}
+            colorMap = { ...baseRecord }
+            labelValues.forEach((lv) => {
+                const key = String(lv)
+                if (prevRecord[key]) colorMap![key] = prevRecord[key]
+            })
+        }
+        return {
+            ...s,
+            color:
+                !multiLabel
+                    ? (s.color ??
+                        prevSeg?.color ??
+                        (s.role === 'pred' ? DEFAULT_PRED_COLOR : generateDistinctColor(i, next.length)))
+                    : undefined,
+            colorMap: multiLabel ? colorMap : undefined,
+            visible: s.visible ?? prevSeg?.visible ?? true,
+            mode: s.mode ?? prevSeg?.mode ?? 'filled',
+        }
+    })
 }
 
 export function DatasetViewerPanel() {
@@ -94,19 +134,30 @@ export function DatasetViewerPanel() {
     const [clickedVoxel, setClickedVoxel] = useState<{ x: number; y: number; z: number } | null>(null)
     const frameRef = useRef<HTMLDivElement>(null)
     const canvasContainerRef = useRef<HTMLDivElement>(null)
+    const sliceWheelRef = useRef<HTMLDivElement>(null)
     const [frameSize, setFrameSize] = useState({ width: 512, height: 512 })
     const lastSizeRef = useRef({ width: 512, height: 512 })
     const [canvasSize, setCanvasSize] = useState({ width: 512, height: 512 })
     const canvasRendererRef = useRef<CanvasRendererHandle>(null)
     const snapRequestRef = useRef(0)
+    const [componentIndexByVolumeId, setComponentIndexByVolumeId] = useState<Record<string, number>>({})
     const prefetchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const prefetchRequestIdRef = useRef(0)
     const segList = useMemo(() => datasetCase?.segVolumes ?? [], [datasetCase?.segVolumes])
+    const manySegs = segList.length >= SEG_LIST_COLLAPSE_AT
+    const [maskPanelOpen, setMaskPanelOpen] = useState(!manySegs)
+    useEffect(() => {
+        setMaskPanelOpen(!manySegs)
+    }, [manySegs, datasetCase?.caseId])
     const segColorMaps = useMemo(() => {
         const maps = new Map<string, Map<number, string>>()
-        segList.forEach((seg) => {
-            if (seg.multiLabel && seg.labelValues && seg.labelValues.length > 1) {
-                const colorMap = createColorMapFromPalette(seg.labelValues, 'colorblind')
+        segList.forEach((seg, i) => {
+            const labelValues = seg.labelValues ?? []
+            if (labelValues.length > 1) {
+                const colorMap =
+                    seg.colorMap && Object.keys(seg.colorMap).length > 0
+                        ? recordToColorMap(seg.colorMap)
+                        : createColorMapFromPalette(labelValues, 'colorblind', i)
                 maps.set(seg.volumeId, colorMap)
             }
         })
@@ -133,10 +184,47 @@ export function DatasetViewerPanel() {
         [datasetCase, setDatasetCase]
     )
 
+    const updateSegLabelColor = useCallback(
+        (index: number, labelValue: number, color: string) => {
+            if (!datasetCase) return
+            const seg = datasetCase.segVolumes[index]
+            if (!seg) return
+            const prevMap = seg.colorMap ?? {}
+            const nextMap = { ...prevMap, [String(labelValue)]: color }
+            const nextSegs = datasetCase.segVolumes.map((s, i) =>
+                i === index ? { ...s, colorMap: nextMap } : s
+            )
+            setDatasetCase({ ...datasetCase, segVolumes: nextSegs })
+        },
+        [datasetCase, setDatasetCase]
+    )
+
     const updateSegMode = useCallback(
         (index: number, mode: 'filled' | 'boundary') => {
             if (!datasetCase) return
             const nextSegs = datasetCase.segVolumes.map((s, i) => (i === index ? { ...s, mode } : s))
+            setDatasetCase({ ...datasetCase, segVolumes: nextSegs })
+        },
+        [datasetCase, setDatasetCase]
+    )
+
+    const updateSegName = useCallback(
+        (index: number, name: string) => {
+            if (!datasetCase) return
+            const nextSegs = datasetCase.segVolumes.map((s, i) =>
+                i === index ? { ...s, name: name || undefined } : s
+            )
+            setDatasetCase({ ...datasetCase, segVolumes: nextSegs })
+        },
+        [datasetCase, setDatasetCase]
+    )
+
+    const updateSegRole = useCallback(
+        (index: number, role: 'gt' | 'pred' | undefined) => {
+            if (!datasetCase) return
+            const nextSegs = datasetCase.segVolumes.map((s, i) =>
+                i === index ? { ...s, role } : s
+            )
             setDatasetCase({ ...datasetCase, segVolumes: nextSegs })
         },
         [datasetCase, setDatasetCase]
@@ -154,6 +242,10 @@ export function DatasetViewerPanel() {
             segList[0]
         return preferred?.volumeId ?? null
     }, [segList])
+
+    const gtVolumeId = segList.find((s) => s.role === 'gt')?.volumeId ?? null
+    const predVolumeId = segList.find((s) => s.role === 'pred')?.volumeId ?? null
+    const { data: diceData } = useDice(gtVolumeId, predVolumeId)
     
     useEffect(() => {
         const requestId = ++snapRequestRef.current
@@ -168,6 +260,7 @@ export function DatasetViewerPanel() {
                 .then((data) => {
                     if (requestId !== snapRequestRef.current) return
                     setSliceIndex(data.slice_index)
+                    setComponentIndexByVolumeId((prev) => ({ ...prev, [volumeId]: 1 }))
                 })
                 .catch(() => {
                     if (requestId !== snapRequestRef.current) return
@@ -188,16 +281,29 @@ export function DatasetViewerPanel() {
     }, [datasetCase?.caseIndex, datasetCase?.imageVolumeId, datasetCase?.segVolumes, snapToMask, volumeId, datasetCase])
 
     useEffect(() => {
+        setComponentIndexByVolumeId({})
+    }, [datasetCase?.caseIndex, datasetCase?.caseId])
+
+    useEffect(() => {
         if (!snapToMask || !volumeId || !datasetCase) {
             return
         }
         if (orientation === 'axial') {
             return
         }
-        fetchFirstSliceWithMask(volumeId, orientation, true)
-            .then((data) => setSliceIndex(data.slice_index))
-            .catch(() => {})
-    }, [snapToMask, volumeId, orientation, datasetCase])
+        const compIdx = componentIndexByVolumeId[volumeId]
+        const seg = segList.find((s) => s.volumeId === volumeId)
+        const total = seg?.componentCount ?? 0
+        if (compIdx != null && total > 1 && compIdx >= 1 && compIdx <= total) {
+            fetchSliceForComponent(volumeId, orientation, compIdx)
+                .then((data) => setSliceIndex(data.slice_index))
+                .catch(() => {})
+        } else {
+            fetchFirstSliceWithMask(volumeId, orientation, true)
+                .then((data) => setSliceIndex(data.slice_index))
+                .catch(() => {})
+        }
+    }, [snapToMask, volumeId, orientation, datasetCase, componentIndexByVolumeId, segList])
 
     useEffect(() => {
         setClickedXyz(null)
@@ -349,11 +455,8 @@ export function DatasetViewerPanel() {
                 format: 'png' as const,
             }
             const idxs = [sliceIndex - 1, sliceIndex + 1]
-            let prefetchCount = 0
-            const MAX_CONCURRENT_PREFETCH = 3
             idxs.forEach((idx) => {
-                if (idx < 0 || idx > maxIdx || prefetchCount >= MAX_CONCURRENT_PREFETCH) return
-                prefetchCount++
+                if (idx < 0 || idx > maxIdx) return
                 const params = { ...base, slice_index: idx }
                 queryClient.prefetchQuery({
                     queryKey: queryKeys.ctSlice(params),
@@ -364,12 +467,9 @@ export function DatasetViewerPanel() {
             })
 
             if (!datasetCase || segList.length === 0) return
-            prefetchCount = 0
             idxs.forEach((slice_index) => {
-                if (slice_index < 0 || slice_index > maxIdx || prefetchCount >= MAX_CONCURRENT_PREFETCH) return
+                if (slice_index < 0 || slice_index > maxIdx) return
                 segList.forEach((s) => {
-                    if (prefetchCount >= MAX_CONCURRENT_PREFETCH) return
-                    prefetchCount++
                     const params = {
                         volume_id: s.volumeId,
                         slice_index,
@@ -385,7 +485,7 @@ export function DatasetViewerPanel() {
                     })
                 })
             })
-        }, 500)
+        }, 220)
 
         return () => {
             if (prefetchDebounceRef.current) {
@@ -414,6 +514,35 @@ export function DatasetViewerPanel() {
     const handleSliceChange = useCallback((value: number[]) => {
         setSliceIndex(value[0])
     }, [])
+
+    useViewerCanvasWheel(
+        sliceWheelRef,
+        Boolean(datasetCase),
+        maxSliceIndex,
+        () => sliceIndex,
+        (n) => handleSliceChange([n]),
+        () => zoom,
+        (z) => setZoom(z)
+    )
+
+    const handleSnapToComponent = useCallback(
+        async (volumeId: string, delta: number) => {
+            const seg = segList.find((s) => s.volumeId === volumeId)
+            const total = seg?.componentCount ?? 0
+            if (total < 2) return
+            const current = componentIndexByVolumeId[volumeId] ?? 1
+            const next = Math.max(1, Math.min(total, current + delta))
+            if (next === current) return
+            setComponentIndexByVolumeId((prev) => ({ ...prev, [volumeId]: next }))
+            try {
+                const data = await fetchSliceForComponent(volumeId, orientation, next)
+                setSliceIndex(data.slice_index)
+            } catch {
+                toast.error('Could not snap to component')
+            }
+        },
+        [segList, componentIndexByVolumeId, orientation]
+    )
 
     const flushWindowToStore = useCallback(() => {
         const p = windowPendingRef.current
@@ -652,6 +781,7 @@ export function DatasetViewerPanel() {
                         component_count: seg.componentCount ?? null,
                         multi_label: seg.multiLabel ?? null,
                         nonzero_label_count: seg.nonzeroLabelCount ?? null,
+                        label_values: seg.labelValues ?? null,
                     },
                 }
             }),
@@ -763,6 +893,11 @@ export function DatasetViewerPanel() {
                                                                 <div>Components: {s.stats.component_count ?? '—'}</div>
                                                                 <div>Multi‑label: {s.stats.multi_label === null ? '—' : s.stats.multi_label ? 'Yes' : 'No'}</div>
                                                                 <div>Labels: {s.stats.nonzero_label_count ?? '—'}</div>
+                                                                {s.stats.label_values && s.stats.label_values.length > 0 && (
+                                                                    <div className="col-span-2">
+                                                                        Values: {s.stats.label_values.join(', ')}
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                         </div>
                                                     ))}
@@ -842,6 +977,7 @@ export function DatasetViewerPanel() {
                                     style={{ width: frameSize.width, height: frameSize.height }}
                                 >
                                     <div
+                                        ref={sliceWheelRef}
                                         className="absolute inset-0 cursor-move"
                                         onMouseDown={handleMouseDown}
                                         onMouseMove={handleMouseMove}
@@ -889,7 +1025,7 @@ export function DatasetViewerPanel() {
                     <CardHeader className="shrink-0">
                         <CardTitle className="text-base font-semibold tracking-tight">Controls</CardTitle>
                     </CardHeader>
-                    <CardContent className="space-y-5 flex-1 min-h-0 overflow-y-auto">
+                    <CardContent className="min-w-0 space-y-5 flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
                         <div className="flex min-h-9 items-center justify-center">
                             <div className="inline-flex min-w-0 rounded-xl border border-input bg-muted/30 p-0.5" role="group" aria-label="View orientation">
                                 {(['axial', 'sagittal', 'coronal'] as const).map((ori) => (
@@ -920,6 +1056,48 @@ export function DatasetViewerPanel() {
                                 />
                             </div>
                         </div>
+                        {segList.some((s) => (s.componentCount ?? 0) > 1) && (
+                            <div className="space-y-2">
+                                <Label className="text-xs">Component navigation</Label>
+                                <div className="space-y-1.5">
+                                    {segList
+                                        .filter((s) => (s.componentCount ?? 0) > 1)
+                                        .map((s, i) => {
+                                            const total = s.componentCount ?? 0
+                                            const current = componentIndexByVolumeId[s.volumeId] ?? 1
+                                            const name = s.name ?? (s.role === 'pred' ? 'Prediction' : s.role === 'gt' ? 'Label' : `Segmentation ${i + 1}`)
+                                            return (
+                                                <div key={s.volumeId} className="flex items-center gap-2 text-xs">
+                                                    <span className="min-w-0 truncate flex-1">{name}</span>
+                                                    <div className="flex items-center gap-0.5 shrink-0">
+                                                        <Button
+                                                            variant="outline"
+                                                            size="icon"
+                                                            className="h-6 w-6"
+                                                            onClick={() => handleSnapToComponent(s.volumeId, -1)}
+                                                            disabled={current <= 1}
+                                                        >
+                                                            <ChevronLeft className="h-3 w-3" />
+                                                        </Button>
+                                                        <span className="min-w-[3ch] text-center tabular-nums">
+                                                            {current}/{total}
+                                                        </span>
+                                                        <Button
+                                                            variant="outline"
+                                                            size="icon"
+                                                            className="h-6 w-6"
+                                                            onClick={() => handleSnapToComponent(s.volumeId, 1)}
+                                                            disabled={current >= total}
+                                                        >
+                                                            <ChevronRight className="h-3 w-3" />
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            )
+                                        })}
+                                </div>
+                            </div>
+                        )}
                         <p className="text-xs text-muted-foreground">Click on image to set level and width from that area.</p>
                         <div className="space-y-2">
                             <Select
@@ -979,72 +1157,175 @@ export function DatasetViewerPanel() {
                                 <ZoomIn className="h-4 w-4" />
                             </Button>
                         </div>
-                        <div className="space-y-3 border-t pt-3">
+                        <div className="min-w-0 space-y-3 border-t pt-3">
+                            {gtVolumeId && predVolumeId && diceData && (
+                                <div className="flex items-center gap-2 text-xs">
+                                    <span className="text-muted-foreground">DICE:</span>
+                                    <Badge variant="outline" className="font-mono">
+                                        {diceData.dice.toFixed(4)}
+                                    </Badge>
+                                </div>
+                            )}
+                            {manySegs && (
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 w-full justify-between gap-2 px-2"
+                                    onClick={() => setMaskPanelOpen((o) => !o)}
+                                    aria-expanded={maskPanelOpen}
+                                >
+                                    <span className="truncate text-xs">
+                                        Masks ({segList.length})
+                                    </span>
+                                    {maskPanelOpen ? (
+                                        <ChevronUp className="h-4 w-4 shrink-0" />
+                                    ) : (
+                                        <ChevronDown className="h-4 w-4 shrink-0" />
+                                    )}
+                                </Button>
+                            )}
+                            <div
+                                className={cn(
+                                    'min-w-0 space-y-3',
+                                    manySegs && !maskPanelOpen && 'hidden'
+                                )}
+                            >
                             {segList.map((s, i) => {
                                 const multiLabelColorMap = segColorMaps.get(s.volumeId)
                                 const colors = multiLabelColorMap
                                     ? Array.from(multiLabelColorMap.values())
                                     : [getSegColor(s, i)]
                                 return (
-                                    <div key={`${s.volumeId}-${i}`} className="flex items-center gap-2 min-w-0">
-                                        <div className="flex gap-0.5 shrink-0">
-                                            {colors.map((color, idx) => (
-                                                <span
-                                                    key={idx}
-                                                    className="h-3 w-3 rounded border border-border"
-                                                    style={{ backgroundColor: color }}
-                                                    aria-hidden
-                                                />
-                                            ))}
-                                        </div>
-                                        <Label className="text-xs min-w-0 flex-1 truncate">
-                                            {s.name || (s.role === 'pred' ? 'Prediction' : s.role === 'gt' ? 'Label' : `Mask ${i + 1}`)}
-                                        </Label>
-                                    {s.role && (
-                                        <Badge
-                                            variant={s.role === 'pred' ? 'secondary' : 'default'}
-                                            className="h-5 rounded-sm px-1.5 text-[10px] shrink-0"
-                                        >
-                                            {s.role === 'pred' ? 'Pred' : 'GT'}
-                                        </Badge>
-                                    )}
-                                    <Switch
-                                        checked={s.visible !== false}
-                                        onCheckedChange={(v) => updateSegVisible(i, v)}
-                                    />
-                                    <DropdownMenu>
-                                        <DropdownMenuTrigger asChild>
-                                            <Button variant="outline" size="sm">
-                                                {(s.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
-                                            </Button>
-                                        </DropdownMenuTrigger>
-                                        <DropdownMenuContent>
-                                            <DropdownMenuItem onClick={() => updateSegMode(i, 'filled')}>Filled</DropdownMenuItem>
-                                            <DropdownMenuItem onClick={() => updateSegMode(i, 'boundary')}>Boundary</DropdownMenuItem>
-                                        </DropdownMenuContent>
-                                    </DropdownMenu>
-                                    <Popover>
-                                        <PopoverTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                size="icon"
-                                                className="h-8 w-8 shrink-0"
+                                    <div
+                                        key={`${s.volumeId}-${i}`}
+                                        className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-2"
+                                    >
+                                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                                            <div
+                                                className="flex max-w-[5.5rem] shrink-0 gap-0.5 overflow-x-auto py-0.5 [scrollbar-width:thin]"
+                                                title={colors.length > 5 ? `${colors.length} labels` : undefined}
                                             >
-                                                <Palette className="h-4 w-4" />
-                                            </Button>
-                                        </PopoverTrigger>
-                                        <PopoverContent className="w-48">
-                                            <input
-                                                type="color"
-                                                value={getSegColor(s, i)}
-                                                onChange={(e) => updateSegColor(i, e.target.value)}
-                                                className="w-full h-8 cursor-pointer rounded"
+                                                {colors.map((color, idx) => (
+                                                    <span
+                                                        key={idx}
+                                                        className="h-3 w-3 shrink-0 rounded border border-border"
+                                                        style={{ backgroundColor: color }}
+                                                        aria-hidden
+                                                    />
+                                                ))}
+                                            </div>
+                                            <Input
+                                                value={s.name ?? ''}
+                                                onChange={(e) => updateSegName(i, e.target.value)}
+                                                placeholder={
+                                                    s.role === 'pred'
+                                                        ? 'Prediction'
+                                                        : s.role === 'gt'
+                                                          ? 'Label'
+                                                          : `Mask ${i + 1}`
+                                                }
+                                                className="h-7 min-w-0 flex-1 border-0 bg-transparent px-1 text-xs shadow-none focus-visible:ring-1"
                                             />
-                                        </PopoverContent>
-                                    </Popover>
+                                        </div>
+                                        <div className="flex min-w-0 flex-wrap items-center gap-1 sm:shrink-0">
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                <Button
+                                                    type="button"
+                                                    variant={s.role === 'gt' ? 'default' : 'outline'}
+                                                    size="sm"
+                                                    className="h-5 px-1.5 text-[10px]"
+                                                    onClick={() => updateSegRole(i, s.role === 'gt' ? undefined : 'gt')}
+                                                >
+                                                    GT
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    variant={s.role === 'pred' ? 'secondary' : 'outline'}
+                                                    size="sm"
+                                                    className="h-5 px-1.5 text-[10px]"
+                                                    onClick={() => updateSegRole(i, s.role === 'pred' ? undefined : 'pred')}
+                                                >
+                                                    Pred
+                                                </Button>
+                                            </div>
+                                            <Switch
+                                                checked={s.visible !== false}
+                                                onCheckedChange={(v) => updateSegVisible(i, v)}
+                                            />
+                                            <DropdownMenu>
+                                                <DropdownMenuTrigger asChild>
+                                                    <Button variant="outline" size="sm">
+                                                        {(s.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
+                                                    </Button>
+                                                </DropdownMenuTrigger>
+                                                <DropdownMenuContent>
+                                                    <DropdownMenuItem onClick={() => updateSegMode(i, 'filled')}>
+                                                        Filled
+                                                    </DropdownMenuItem>
+                                                    <DropdownMenuItem onClick={() => updateSegMode(i, 'boundary')}>
+                                                        Boundary
+                                                    </DropdownMenuItem>
+                                                </DropdownMenuContent>
+                                            </DropdownMenu>
+                                            <Popover>
+                                                <PopoverTrigger asChild>
+                                                    <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0">
+                                                        <Palette className="h-4 w-4" />
+                                                    </Button>
+                                                </PopoverTrigger>
+                                                <PopoverContent className="w-52">
+                                                    {multiLabelColorMap ? (
+                                                        <div className="space-y-2">
+                                                            <div className="text-xs font-medium text-muted-foreground">
+                                                                Label colors
+                                                            </div>
+                                                            <div className="max-h-48 space-y-1.5 overflow-y-auto">
+                                                                {Array.from(multiLabelColorMap.entries())
+                                                                    .sort(([a], [b]) => a - b)
+                                                                    .map(([labelVal, color]) => (
+                                                                        <div
+                                                                            key={labelVal}
+                                                                            className="flex items-center gap-2"
+                                                                        >
+                                                                            <span
+                                                                                className="h-4 w-4 shrink-0 rounded border border-border"
+                                                                                style={{ backgroundColor: color }}
+                                                                            />
+                                                                            <span className="w-6 shrink-0 text-xs tabular-nums">
+                                                                                {labelVal}
+                                                                            </span>
+                                                                            <input
+                                                                                type="color"
+                                                                                value={color}
+                                                                                onChange={(e) =>
+                                                                                    updateSegLabelColor(
+                                                                                        i,
+                                                                                        labelVal,
+                                                                                        e.target.value
+                                                                                    )
+                                                                                }
+                                                                                className="h-6 min-w-0 flex-1 cursor-pointer rounded"
+                                                                            />
+                                                                        </div>
+                                                                    ))}
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        <input
+                                                            type="color"
+                                                            value={getSegColor(s, i)}
+                                                            onChange={(e) => updateSegColor(i, e.target.value)}
+                                                            className="h-8 w-full cursor-pointer rounded"
+                                                        />
+                                                    )}
+                                                </PopoverContent>
+                                            </Popover>
+                                        </div>
                                     </div>
                                 )
                             })}
+                            </div>
                             {segList.length > 0 && (
                                 <div className="space-y-2">
                                     <Label className="text-xs">Overlay opacity: {(overlayOpacity * 100).toFixed(0)}%</Label>

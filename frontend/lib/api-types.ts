@@ -143,11 +143,55 @@ export interface SegmentationStats {
     component_count: number
     multi_label: boolean
     nonzero_label_count: number
+    label_values?: number[] | null
 }
 
 export interface GetCasesResponse {
     case_count: number
     case_ids: string[]
+}
+
+export interface GlobalIntensityStats {
+    minimum: number
+    maximum: number
+    mean: number
+    sigma: number
+}
+
+export interface PerLabelStatistics {
+    label: number
+    voxel_count: number
+    volume_mm3: number
+    ct_mean: number
+    ct_sigma: number
+    ct_min: number
+    ct_max: number
+}
+
+export interface CaseStatisticsRequest {
+    case_index: number
+    seg_index?: number
+}
+
+export interface CaseStatisticsResponse {
+    case_id: string
+    skipped: boolean
+    warning?: string | null
+    geometry_match: boolean
+    ct: VolumeMetadata
+    seg: VolumeMetadata
+    volumes_mm3: number[]
+    max_component_mm3?: number | null
+    global_intensity: GlobalIntensityStats
+    label_values: number[]
+    multi_label: boolean
+    per_label: PerLabelStatistics[]
+    ct_file_meta: Record<string, string>
+    seg_file_meta: Record<string, string>
+}
+
+export interface DiceResponse {
+    dice: number
 }
 
 export interface FirstSliceWithMaskResponse {

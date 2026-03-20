@@ -109,7 +109,9 @@ Key components: **ViewerGrid** (grid of panels), **ViewerPanel** (W/L, zoom, pan
 
 **Backend (`.env` in `backend/`):**
 
-- `MAX_CACHE_SIZE_MB` – Volume cache limit (default: 4096)
+- `MAX_CACHE_SIZE_MB` – LRU memory budget for **cached CT/segmentation PNG slices** (default: 4096). Evicts least-recently-used slice PNGs when full; full 3D volumes remain in memory until unload.
+- `SLICE_PNG_CACHE` – Enable slice PNG LRU (`1`/`true`, default); set `0`/`false` to disable caching.
+- `SLICE_PNG_COMPRESS_LEVEL` – Pillow PNG compression 0–9 (default `3`); lower = faster encoding, larger PNGs.
 - `MAX_FILE_SIZE_MB` – Upload size limit (default: 2048)
 - `LOG_LEVEL` – DEBUG, INFO, WARNING, ERROR (default: INFO). Logs go to stdout and `backend.log`.
 - `DEBUG` – If set, error responses include full exception detail.
@@ -117,6 +119,7 @@ Key components: **ViewerGrid** (grid of panels), **ViewerPanel** (W/L, zoom, pan
 **Frontend (`.env.local` in `frontend/`):**
 
 - `NEXT_PUBLIC_API_URL` – Backend URL (default: http://localhost:8000)
+- `NEXT_PUBLIC_SLICE_FETCH_CONCURRENCY` – Max parallel CT/segmentation slice fetches (default: 12). Lower if scrolling still stutters on a slow Mac; raise on a fast machine with many masks.
 
 ## API Overview
 
@@ -151,6 +154,9 @@ cd frontend && npm test
 
 ## Building for Production
 
+**Standalone macOS app (DMG):** See [REBUILD_APP.md](REBUILD_APP.md). Clone the repo, run the one-time setup, then `npm run dist`. Building locally avoids Gatekeeper quarantine issues.
+
+**Docker:**
 - Backend: `docker build -t ct-viewer-backend backend/`
 - Frontend: `cd frontend && npm run build && docker build -t ct-viewer-frontend .`
 

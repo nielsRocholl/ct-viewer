@@ -5,6 +5,7 @@ transformations to CT slices, and encodes slices as PNG for transmission.
 """
 
 import logging
+import os
 from io import BytesIO
 from typing import Literal, Tuple
 
@@ -13,6 +14,9 @@ import SimpleITK as sitk
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# 1–3: faster encode for interactive scrolling; 6: Pillow default (smaller files).
+_PNG_COMPRESS = max(0, min(9, int(os.getenv("SLICE_PNG_COMPRESS_LEVEL", "3"))))
 
 HU_MIN, HU_MAX = -1024.0, 3000.0
 WW_MIN, WW_MAX = 50.0, 2000.0
@@ -315,18 +319,41 @@ class SliceExtractorService:
         volume: sitk.Image,
         orientation: Literal['axial', 'sagittal', 'coronal'] = 'axial'
     ) -> int:
-        """Return the slice index at the center of the mask extent along the given orientation."""
+        """Return slice index at centroid of foreground (center of mass)."""
         arr = np.asarray(sitk.GetArrayFromImage(volume))
-        if orientation == 'axial':
-            has_fg = np.any(arr != 0, axis=(1, 2))
-        elif orientation == 'sagittal':
-            has_fg = np.any(arr != 0, axis=(0, 1))
-        else:
-            has_fg = np.any(arr != 0, axis=(0, 2))
-        idx = np.flatnonzero(has_fg)
-        if idx.size == 0:
+        mask = arr != 0
+        n = np.sum(mask)
+        if n == 0:
             return 0
-        return int((int(idx[0]) + int(idx[-1])) // 2)
+        idx = np.nonzero(mask)
+        com = np.array([np.sum(idx[i]) for i in range(3)]) / n
+        axis = {'axial': 0, 'sagittal': 2, 'coronal': 1}[orientation]
+        slice_idx = int(round(com[axis]))
+        return max(0, min(slice_idx, arr.shape[axis] - 1))
+
+    @staticmethod
+    def middle_slice_for_component(
+        volume: sitk.Image,
+        orientation: Literal['axial', 'sagittal', 'coronal'] = 'axial',
+        component_index: int = 1
+    ) -> int:
+        """Return slice index at centroid of connected component (1-based, ordered by size)."""
+        mask = volume > 0
+        cc_filter = sitk.ConnectedComponentImageFilter()
+        cc_filter.SetFullyConnected(True)
+        cc = cc_filter.Execute(mask)
+        relabel = sitk.RelabelComponentImageFilter()
+        relabeled = relabel.Execute(cc)
+        arr = np.asarray(sitk.GetArrayFromImage(relabeled))
+        comp_mask = arr == component_index
+        n = int(np.sum(comp_mask))
+        if n == 0:
+            return 0
+        idx = np.nonzero(comp_mask)
+        com = np.array([np.sum(idx[i]) for i in range(3)]) / n
+        axis = {'axial': 0, 'sagittal': 2, 'coronal': 1}[orientation]
+        slice_idx = int(round(com[axis]))
+        return max(0, min(slice_idx, arr.shape[axis] - 1))
 
     @staticmethod
     def _apply_window_level(
@@ -401,7 +428,7 @@ class SliceExtractorService:
         
         # Encode as PNG
         buffer = BytesIO()
-        image.save(buffer, format='PNG')
+        image.save(buffer, format='PNG', compress_level=_PNG_COMPRESS)
         
         return buffer.getvalue()
     
@@ -427,6 +454,6 @@ class SliceExtractorService:
         
         # Encode as PNG
         buffer = BytesIO()
-        image.save(buffer, format='PNG')
+        image.save(buffer, format='PNG', compress_level=_PNG_COMPRESS)
         
         return buffer.getvalue()
