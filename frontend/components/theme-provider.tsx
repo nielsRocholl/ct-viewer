@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useState } from 'react'
 import type { Theme } from '@/types/theme'
 
 interface ThemeProviderState {
@@ -20,50 +20,52 @@ interface ThemeProviderProps {
 
 const ThemeProviderContext = createContext<ThemeProviderState | undefined>(undefined)
 
-function getInitialTheme(storageKey: string, defaultTheme: Theme): Theme {
-    void storageKey
-    void defaultTheme
-    return 'system'
-}
-
-function getInitialSystemTheme(): 'light' | 'dark' {
-    if (typeof window === 'undefined') return 'light'
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-}
-
 export function ThemeProvider({
     children,
     defaultTheme = 'system',
     storageKey = 'ui-theme',
 }: ThemeProviderProps) {
-    const [theme, setThemeState] = useState<Theme>(() => getInitialTheme(storageKey, defaultTheme))
-    const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>(getInitialSystemTheme)
+    const [theme, setThemeState] = useState<Theme>(defaultTheme)
+    const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>('light')
 
     useEffect(() => {
-        const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-        setSystemTheme(mediaQuery.matches ? 'dark' : 'light')
-        const handleChange = (e: MediaQueryListEvent) => {
-            setSystemTheme(e.matches ? 'dark' : 'light')
-        }
-        mediaQuery.addEventListener('change', handleChange)
-        return () => mediaQuery.removeEventListener('change', handleChange)
-    }, [])
-
-    useEffect(() => {
-        const root = window.document.documentElement
-        const resolved = theme === 'system' ? systemTheme : theme
-        root.classList.remove('light', 'dark')
-        root.classList.add(resolved)
-    }, [theme, systemTheme])
-
-    const setTheme = (newTheme: Theme) => {
         try {
-            localStorage.setItem(storageKey, 'system')
+            const raw = localStorage.getItem(storageKey)
+            if (raw === 'light' || raw === 'dark' || raw === 'system') setThemeState(raw)
         } catch {
             // ignore
         }
-        setThemeState('system')
-    }
+    }, [storageKey])
+
+    useLayoutEffect(() => {
+        const mq = window.matchMedia('(prefers-color-scheme: dark)')
+        const readSystem = (): 'light' | 'dark' => (mq.matches ? 'dark' : 'light')
+
+        const sync = () => {
+            const st = readSystem()
+            setSystemTheme(st)
+            const root = document.documentElement
+            const resolved = theme === 'system' ? st : theme
+            root.classList.remove('light', 'dark')
+            root.classList.add(resolved)
+        }
+
+        sync()
+        mq.addEventListener('change', sync)
+        return () => mq.removeEventListener('change', sync)
+    }, [theme])
+
+    const setTheme = useCallback(
+        (newTheme: Theme) => {
+            setThemeState(newTheme)
+            try {
+                localStorage.setItem(storageKey, newTheme)
+            } catch {
+                // ignore
+            }
+        },
+        [storageKey]
+    )
 
     const resolvedTheme = theme === 'system' ? systemTheme : theme
 

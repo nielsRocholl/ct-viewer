@@ -295,6 +295,11 @@ class PerLabelStatistics(BaseModel):
 class CaseStatisticsRequest(BaseModel):
     case_index: int
     seg_index: int = 0
+    include_global_ct_intensity: bool = True
+    include_lesion_connected_components: bool = True
+    include_label_segmentation_stats: bool = True
+    include_per_label_ct_intensity: bool = True
+    include_file_metadata: bool = True
 
 
 class CaseStatisticsResponse(BaseModel):
@@ -306,7 +311,7 @@ class CaseStatisticsResponse(BaseModel):
     seg: VolumeMetadataResponse
     volumes_mm3: list[float]
     max_component_mm3: Optional[float] = None
-    global_intensity: GlobalIntensityStats
+    global_intensity: Optional[GlobalIntensityStats] = None
     label_values: list[int]
     multi_label: bool
     per_label: list[PerLabelStatistics]
@@ -718,8 +723,18 @@ async def dataset_case_statistics(dataset_id: str, body: CaseStatisticsRequest):
     try:
         ct_img = volume_loader.get_volume(ct_id)
         seg_img = volume_loader.get_volume(seg_id)
-        raw = compute_case_statistics(ct_img, seg_img, ct_meta, seg_meta)
-        gi = raw["global_intensity"]
+        raw = compute_case_statistics(
+            ct_img,
+            seg_img,
+            ct_meta,
+            seg_meta,
+            include_global_ct_intensity=body.include_global_ct_intensity,
+            include_lesion_connected_components=body.include_lesion_connected_components,
+            include_label_segmentation_stats=body.include_label_segmentation_stats,
+            include_per_label_ct_intensity=body.include_per_label_ct_intensity,
+            include_file_metadata=body.include_file_metadata,
+        )
+        gi = raw.get("global_intensity")
         return CaseStatisticsResponse(
             case_id=case_id,
             skipped=raw["skipped"],
@@ -729,11 +744,15 @@ async def dataset_case_statistics(dataset_id: str, body: CaseStatisticsRequest):
             seg=metadata_to_response(raw["seg_meta"]),
             volumes_mm3=raw["volumes_mm3"],
             max_component_mm3=raw["max_component_mm3"],
-            global_intensity=GlobalIntensityStats(
-                minimum=gi["minimum"],
-                maximum=gi["maximum"],
-                mean=gi["mean"],
-                sigma=gi["sigma"],
+            global_intensity=(
+                GlobalIntensityStats(
+                    minimum=gi["minimum"],
+                    maximum=gi["maximum"],
+                    mean=gi["mean"],
+                    sigma=gi["sigma"],
+                )
+                if gi
+                else None
             ),
             label_values=raw["label_values"],
             multi_label=raw["multi_label"],

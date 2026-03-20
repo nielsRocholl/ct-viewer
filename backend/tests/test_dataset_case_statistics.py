@@ -59,7 +59,33 @@ def test_compute_one_label_ct_stats():
     assert pl["voxel_count"] == 6**3
     assert abs(pl["ct_mean"] - 500.0) < 1.0
     gi = out["global_intensity"]
+    assert gi is not None
     assert gi["minimum"] <= 100 and gi["maximum"] >= 500
+
+
+def test_flags_geometry_only():
+    w, h, d = 8, 8, 8
+    ct = sitk.GetImageFromArray(np.ones((d, h, w), dtype=np.int16))
+    seg = sitk.GetImageFromArray(np.zeros((d, h, w), dtype=np.uint8))
+    ct.SetSpacing((1, 1, 1))
+    seg.SetSpacing((1, 1, 1))
+    m = _meta((w, h, d))
+    out = compute_case_statistics(
+        ct,
+        seg,
+        m,
+        m,
+        include_global_ct_intensity=False,
+        include_lesion_connected_components=False,
+        include_label_segmentation_stats=False,
+        include_per_label_ct_intensity=False,
+        include_file_metadata=False,
+    )
+    assert out["global_intensity"] is None
+    assert out["volumes_mm3"] == []
+    assert out["per_label"] == []
+    assert out["skipped"] is False
+    assert out["ct_file_meta"] == {}
 
 
 def test_all_background():

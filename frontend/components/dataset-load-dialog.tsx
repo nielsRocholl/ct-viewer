@@ -10,7 +10,7 @@ import type {
     SegmentationDir,
     SegmentationVolumeInfo,
 } from '@/lib/api-types'
-import { buildDatasetStatisticsPayload } from '@/lib/dataset-stats-aggregate'
+import { buildDatasetStatisticsPayload, type StatisticsInclusion } from '@/lib/dataset-stats-aggregate'
 import { useViewerStore, type DatasetCaseState } from '@/lib/store'
 import {
     DEFAULT_LABEL_COLOR,
@@ -33,6 +33,7 @@ import { Input } from './ui/input'
 import { Badge } from './ui/badge'
 import { Card, CardContent, CardHeader } from './ui/card'
 import { Progress } from './ui/progress'
+import { Switch } from './ui/switch'
 import { FolderOpen, ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -42,6 +43,25 @@ const ordinal = (n: number) => {
     const v = n % 100
     const s = ['th', 'st', 'nd', 'rd']
     return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`
+}
+
+const defaultStatUi = () => ({
+    include_global_ct_intensity: true,
+    include_lesion_connected_components: true,
+    include_label_segmentation_stats: true,
+    include_per_label_ct_intensity: true,
+    include_file_metadata: true,
+})
+
+function resolvedStatisticsInclusion(ui: ReturnType<typeof defaultStatUi>): StatisticsInclusion {
+    return {
+        include_global_ct_intensity: ui.include_global_ct_intensity,
+        include_lesion_connected_components: ui.include_lesion_connected_components,
+        include_label_segmentation_stats:
+            ui.include_label_segmentation_stats || ui.include_per_label_ct_intensity,
+        include_per_label_ct_intensity: ui.include_per_label_ct_intensity,
+        include_file_metadata: ui.include_file_metadata,
+    }
 }
 
 interface DatasetLoadDialogProps {
@@ -152,8 +172,14 @@ export function DatasetLoadDialog({
     const controlled = openProp !== undefined
     const open = controlled ? openProp : uncontrolledOpen
 
+    const statsCancelRequestedRef = useRef(false)
+    const statsScanActiveRef = useRef(false)
+
     const setDialogOpen = (v: boolean) => {
-        if (!v) setScanProgress(null)
+        if (!v) {
+            if (statsScanActiveRef.current) statsCancelRequestedRef.current = true
+            setScanProgress(null)
+        }
         if (!controlled) setUncontrolledOpen(v)
         onOpenChange?.(v)
     }
@@ -167,6 +193,7 @@ export function DatasetLoadDialog({
     const setDatasetLesionStats = useViewerStore((s) => s.setDatasetLesionStats)
 
     const [scanProgress, setScanProgress] = useState<{ current: number; total: number } | null>(null)
+    const [statUi, setStatUi] = useState(defaultStatUi)
 
     const registerMutation = useMutation({
         mutationFn: registerDataset,
@@ -235,6 +262,7 @@ export function DatasetLoadDialog({
             return
         }
         try {
+            statsCancelRequestedRef.current = false
             const reg = await registerMutation.mutateAsync({
                 images_dir: images,
                 segmentations: segs
@@ -245,12 +273,27 @@ export function DatasetLoadDialog({
                     }))
                     .filter((s) => s.path),
             })
+            if (statsCancelRequestedRef.current) {
+                toast.info('Statistics cancelled')
+                return
+            }
             const responses: CaseStatisticsResponse[] = []
+            const inclusion = resolvedStatisticsInclusion(statUi)
             setScanProgress({ current: 0, total: reg.case_count })
+            statsScanActiveRef.current = true
             for (let i = 0; i < reg.case_count; i++) {
+                if (statsCancelRequestedRef.current) {
+                    toast.info('Statistics cancelled')
+                    return
+                }
                 const r = await fetchDatasetCaseStatistics(reg.dataset_id, {
                     case_index: i,
                     seg_index: segIndex,
+                    include_global_ct_intensity: inclusion.include_global_ct_intensity,
+                    include_lesion_connected_components: inclusion.include_lesion_connected_components,
+                    include_label_segmentation_stats: inclusion.include_label_segmentation_stats,
+                    include_per_label_ct_intensity: inclusion.include_per_label_ct_intensity,
+                    include_file_metadata: inclusion.include_file_metadata,
                 })
                 responses.push(r)
                 setScanProgress({ current: i + 1, total: reg.case_count })
@@ -265,26 +308,33 @@ export function DatasetLoadDialog({
                     datasetId: reg.dataset_id,
                     segIndex,
                     segName,
+                    inclusion,
                 })
             )
             setDatasetCase(null)
             setViewMode('datasetStats')
             setDialogOpen(false)
+            const nCc = responses.reduce((n, r) => n + r.volumes_mm3.length, 0)
             toast.success('Dataset statistics ready', {
-                description: `${responses.reduce((n, r) => n + r.volumes_mm3.length, 0)} connected components across ${reg.case_count} cases`,
+                description:
+                    inclusion.include_lesion_connected_components && nCc > 0
+                        ? `${nCc} connected components across ${reg.case_count} cases`
+                        : `Processed ${reg.case_count} cases`,
             })
         } catch (e) {
             const msg = e instanceof Error ? e.message : 'Statistics run failed'
             toast.error(msg)
         } finally {
+            statsScanActiveRef.current = false
             setScanProgress(null)
+            statsCancelRequestedRef.current = false
         }
     }
 
-    const isLoading =
-        registerMutation.isPending ||
-        (mode === 'load' && openCaseMutation.isPending) ||
-        scanProgress !== null
+    const mutationBusy =
+        registerMutation.isPending || (mode === 'load' && openCaseMutation.isPending)
+    const statsScanning = mode === 'stats' && scanProgress !== null
+    const isLoading = mutationBusy || statsScanning
 
     const showTrigger = trigger != null || !controlled
 
@@ -303,13 +353,13 @@ export function DatasetLoadDialog({
             <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-y-auto overflow-x-hidden min-w-0">
                 <DialogHeader>
                     <DialogTitle>{mode === 'stats' ? 'Dataset statistics' : 'Load Dataset'}</DialogTitle>
-                    {mode === 'load' ? (
-                        <DialogDescription>
-                            {isElectron
-                                ? 'Choose folders for images (required) and optional segmentation folders. Cases matched by base name (nnUNet supported).'
-                                : 'Enter server-accessible folder paths. Cases are matched by base name (nnUNet convention supported).'}
-                        </DialogDescription>
-                    ) : null}
+                    <DialogDescription>
+                        {mode === 'stats'
+                            ? 'Pick folders, then choose which analyses to run. Disabling heavy steps speeds up large cohorts.'
+                            : isElectron
+                              ? 'Choose folders for images (required) and optional segmentation folders. Cases matched by base name (nnUNet supported).'
+                              : 'Enter server-accessible folder paths. Cases are matched by base name (nnUNet convention supported).'}
+                    </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-6 py-4 min-w-0 overflow-hidden">
                     {scanProgress && scanProgress.total > 0 ? (
@@ -592,9 +642,129 @@ export function DatasetLoadDialog({
                             </Button>
                         )}
                     </div>
+
+                    {mode === 'stats' ? (
+                        <Card className="w-full min-w-0 overflow-hidden">
+                            <CardHeader className="p-4 pb-2 space-y-1">
+                                <span className="text-sm font-medium leading-none">What to compute</span>
+                                <p className="text-xs text-muted-foreground font-normal leading-snug">
+                                    Geometry checks always run. Turn off voxel-heavy work when you only need
+                                    alignment or headers.
+                                </p>
+                            </CardHeader>
+                            <CardContent className="p-4 pt-0 space-y-4">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div className="min-w-0 space-y-0.5">
+                                        <Label htmlFor="stat-cc" className="text-sm font-medium">
+                                            Lesion connected components
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground leading-snug">
+                                            Histogram, max CC volume, per-case largest component (26-connected).
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="stat-cc"
+                                        checked={statUi.include_lesion_connected_components}
+                                        onCheckedChange={(v) =>
+                                            setStatUi((s) => ({ ...s, include_lesion_connected_components: v }))
+                                        }
+                                        disabled={isLoading}
+                                        className="shrink-0"
+                                    />
+                                </div>
+                                <div className="flex items-start justify-between gap-4">
+                                    <div className="min-w-0 space-y-0.5">
+                                        <Label htmlFor="stat-label" className="text-sm font-medium">
+                                            Label segmentation stats
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground leading-snug">
+                                            Per-label voxel counts and volumes (label IDs &gt; 0).
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="stat-label"
+                                        checked={statUi.include_label_segmentation_stats}
+                                        onCheckedChange={(v) =>
+                                            setStatUi((s) => ({
+                                                ...s,
+                                                include_label_segmentation_stats: v,
+                                                include_per_label_ct_intensity: v
+                                                    ? s.include_per_label_ct_intensity
+                                                    : false,
+                                            }))
+                                        }
+                                        disabled={isLoading}
+                                        className="shrink-0"
+                                    />
+                                </div>
+                                <div className="flex items-start justify-between gap-4">
+                                    <div className="min-w-0 space-y-0.5">
+                                        <Label htmlFor="stat-plct" className="text-sm font-medium">
+                                            Per-label CT intensity
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground leading-snug">
+                                            Mean / σ / min / max HU inside each label (requires label stats).
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="stat-plct"
+                                        checked={statUi.include_per_label_ct_intensity}
+                                        onCheckedChange={(v) =>
+                                            setStatUi((s) => ({
+                                                ...s,
+                                                include_per_label_ct_intensity: v,
+                                                include_label_segmentation_stats:
+                                                    v || s.include_label_segmentation_stats,
+                                            }))
+                                        }
+                                        disabled={isLoading}
+                                        className="shrink-0"
+                                    />
+                                </div>
+                                <div className="flex items-start justify-between gap-4">
+                                    <div className="min-w-0 space-y-0.5">
+                                        <Label htmlFor="stat-gi" className="text-sm font-medium">
+                                            Global CT intensity
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground leading-snug">
+                                            Full-volume mean and cohort outlier scan (|z| &gt; 3).
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="stat-gi"
+                                        checked={statUi.include_global_ct_intensity}
+                                        onCheckedChange={(v) =>
+                                            setStatUi((s) => ({ ...s, include_global_ct_intensity: v }))
+                                        }
+                                        disabled={isLoading}
+                                        className="shrink-0"
+                                    />
+                                </div>
+                                <div className="flex items-start justify-between gap-4">
+                                    <div className="min-w-0 space-y-0.5">
+                                        <Label htmlFor="stat-meta" className="text-sm font-medium">
+                                            File metadata
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground leading-snug">
+                                            Header key/value aggregation in the dashboard.
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="stat-meta"
+                                        checked={statUi.include_file_metadata}
+                                        onCheckedChange={(v) =>
+                                            setStatUi((s) => ({ ...s, include_file_metadata: v }))
+                                        }
+                                        disabled={isLoading}
+                                        className="shrink-0"
+                                    />
+                                </div>
+                            </CardContent>
+                        </Card>
+                    ) : null}
                 </div>
                 <div className="flex justify-end gap-2 pt-2">
-                    <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={isLoading}>
+                    <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={mutationBusy}>
                         Cancel
                     </Button>
                     <Button

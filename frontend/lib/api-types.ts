@@ -171,6 +171,11 @@ export interface PerLabelStatistics {
 export interface CaseStatisticsRequest {
     case_index: number
     seg_index?: number
+    include_global_ct_intensity?: boolean
+    include_lesion_connected_components?: boolean
+    include_label_segmentation_stats?: boolean
+    include_per_label_ct_intensity?: boolean
+    include_file_metadata?: boolean
 }
 
 export interface CaseStatisticsResponse {
@@ -182,7 +187,7 @@ export interface CaseStatisticsResponse {
     seg: VolumeMetadata
     volumes_mm3: number[]
     max_component_mm3?: number | null
-    global_intensity: GlobalIntensityStats
+    global_intensity?: GlobalIntensityStats | null
     label_values: number[]
     multi_label: boolean
     per_label: PerLabelStatistics[]

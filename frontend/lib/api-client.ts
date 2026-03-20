@@ -276,7 +276,15 @@ export async function fetchDatasetCaseStatistics(
     const response = await fetch(`${API_BASE_URL}/api/datasets/${datasetId}/cases/statistics`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ case_index: request.case_index, seg_index: request.seg_index ?? 0 }),
+        body: JSON.stringify({
+            case_index: request.case_index,
+            seg_index: request.seg_index ?? 0,
+            include_global_ct_intensity: request.include_global_ct_intensity ?? true,
+            include_lesion_connected_components: request.include_lesion_connected_components ?? true,
+            include_label_segmentation_stats: request.include_label_segmentation_stats ?? true,
+            include_per_label_ct_intensity: request.include_per_label_ct_intensity ?? true,
+            include_file_metadata: request.include_file_metadata ?? true,
+        }),
     })
     return handleResponse<CaseStatisticsResponse>(response)
 }

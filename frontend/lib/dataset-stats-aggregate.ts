@@ -4,18 +4,28 @@ import { buildDatasetLesionStatsPayload, type DatasetLesionStatsComputed } from 
 const EPS = 1e-5
 const META_COVERAGE = 0.8
 
+/** Flags sent to the statistics API (label stats implied if per-label CT is on). */
+export interface StatisticsInclusion {
+    include_global_ct_intensity: boolean
+    include_lesion_connected_components: boolean
+    include_label_segmentation_stats: boolean
+    include_per_label_ct_intensity: boolean
+    include_file_metadata: boolean
+}
+
 export interface DatasetCaseTableRow {
     case_id: string
     skipped: boolean
     geometry_match: boolean
     dimensions: [number, number, number]
     spacing: [number, number, number]
-    ct_mean: number
+    ct_mean: number | null
     max_component_mm3: number | null
     multi_label: boolean
 }
 
 export interface DatasetStatisticsComputed extends DatasetLesionStatsComputed {
+    inclusion: StatisticsInclusion
     geometryMismatchCaseCount: number
     dimensionHistogram: { key: string; count: number }[]
     spacingHistogram: { key: string; spacing: [number, number, number]; count: number }[]
@@ -99,8 +109,10 @@ export function buildDatasetStatisticsPayload(input: {
     datasetId: string
     segIndex: number
     segName: string | null
+    inclusion: StatisticsInclusion
 }): DatasetStatisticsComputed {
-    const { responses } = input
+    const { responses, inclusion: inc } = input
+    const labelSeg = inc.include_label_segmentation_stats || inc.include_per_label_ct_intensity
     const allVol: number[] = []
     let casesWithFg = 0
     let geometryMismatchCaseCount = 0
@@ -110,8 +122,12 @@ export function buildDatasetStatisticsPayload(input: {
     const caseRows: DatasetCaseTableRow[] = []
 
     for (const r of responses) {
-        allVol.push(...r.volumes_mm3)
-        if (!r.skipped && r.volumes_mm3.length > 0) casesWithFg++
+        if (inc.include_lesion_connected_components) allVol.push(...r.volumes_mm3)
+        if (inc.include_lesion_connected_components) {
+            if (!r.skipped && r.volumes_mm3.length > 0) casesWithFg++
+        } else if (labelSeg) {
+            if (!r.skipped && r.per_label.length > 0) casesWithFg++
+        }
         if (!r.geometry_match) geometryMismatchCaseCount++
 
         const dk = dimKey(r.ct.dimensions)
@@ -127,8 +143,8 @@ export function buildDatasetStatisticsPayload(input: {
             geometry_match: r.geometry_match,
             dimensions: r.ct.dimensions,
             spacing: r.ct.spacing,
-            ct_mean: r.global_intensity.mean,
-            max_component_mm3: r.max_component_mm3 ?? null,
+            ct_mean: r.global_intensity?.mean ?? null,
+            max_component_mm3: inc.include_lesion_connected_components ? (r.max_component_mm3 ?? null) : null,
             multi_label: r.multi_label,
         })
     }
@@ -148,22 +164,29 @@ export function buildDatasetStatisticsPayload(input: {
         }
     }
 
-    const activeMeans = responses.filter((r) => !r.skipped).map((r) => r.global_intensity.mean)
+    const activeMeans = inc.include_global_ct_intensity
+        ? responses.filter((r) => r.global_intensity).map((r) => r.global_intensity!.mean)
+        : []
     const { mean: cohortMean, std: cohortStd } = meanStd(activeMeans)
     const ctMeanOutliers: DatasetStatisticsComputed['ctMeanOutliers'] = []
-    for (const r of responses) {
-        if (r.skipped) continue
-        const m = r.global_intensity.mean
-        const z = cohortStd > 1e-9 ? (m - cohortMean) / cohortStd : 0
-        if (Math.abs(z) > 3) ctMeanOutliers.push({ case_id: r.case_id, mean: m, z })
+    if (inc.include_global_ct_intensity) {
+        for (const r of responses) {
+            const gi = r.global_intensity
+            if (!gi) continue
+            const m = gi.mean
+            const z = cohortStd > 1e-9 ? (m - cohortMean) / cohortStd : 0
+            if (Math.abs(z) > 3) ctMeanOutliers.push({ case_id: r.case_id, mean: m, z })
+        }
     }
 
     const labelVolMap = new Map<number, number[]>()
-    for (const r of responses) {
-        for (const pl of r.per_label) {
-            const arr = labelVolMap.get(pl.label) ?? []
-            arr.push(pl.volume_mm3)
-            labelVolMap.set(pl.label, arr)
+    if (labelSeg) {
+        for (const r of responses) {
+            for (const pl of r.per_label) {
+                const arr = labelVolMap.get(pl.label) ?? []
+                arr.push(pl.volume_mm3)
+                labelVolMap.set(pl.label, arr)
+            }
         }
     }
     const labelRollup: DatasetStatisticsComputed['labelRollup'] = [...labelVolMap.entries()]
@@ -174,8 +197,12 @@ export function buildDatasetStatisticsPayload(input: {
         }))
         .sort((a, b) => a.label - b.label)
 
-    const ctAgg = aggregateFileMeta(responses, 'ct_file_meta', 'ct')
-    const segAgg = aggregateFileMeta(responses, 'seg_file_meta', 'seg')
+    const ctAgg = inc.include_file_metadata
+        ? aggregateFileMeta(responses, 'ct_file_meta', 'ct')
+        : { shared: [], varying: [] }
+    const segAgg = inc.include_file_metadata
+        ? aggregateFileMeta(responses, 'seg_file_meta', 'seg')
+        : { shared: [], varying: [] }
     const varyingMetaKeys = [...ctAgg.varying, ...segAgg.varying]
 
     const base = buildDatasetLesionStatsPayload({
@@ -196,6 +223,7 @@ export function buildDatasetStatisticsPayload(input: {
 
     return {
         ...base,
+        inclusion: inc,
         geometryMismatchCaseCount,
         dimensionHistogram,
         spacingHistogram,
