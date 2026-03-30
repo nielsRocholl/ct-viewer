@@ -21,14 +21,20 @@ export function ElectronTitleBarWrapper({ children }: { children: React.ReactNod
         }
     }, [])
 
-    if (!isElectron) return <>{children}</>
+    if (!isElectron) {
+        return (
+            <div className="flex h-svh max-h-svh min-h-0 flex-col overflow-hidden bg-background">
+                {children}
+            </div>
+        )
+    }
 
     return (
         <div
-            className="min-h-screen bg-background"
+            className="box-border flex h-svh max-h-svh flex-col overflow-hidden bg-background"
             style={{ paddingTop: TITLE_BAR_HEIGHT }}
         >
-            {children}
+            <div className="flex min-h-0 flex-1 basis-0 flex-col overflow-hidden">{children}</div>
         </div>
     )
 }

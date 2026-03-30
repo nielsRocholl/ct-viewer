@@ -39,6 +39,7 @@ export const queryKeys = {
     ctSlice: (params: CTSliceParams) => ['ct-slice', params] as const,
     segSlice: (params: SegmentationSliceParams) => ['seg-slice', params] as const,
     dice: (gtId: string, predId: string) => ['dice', gtId, predId] as const,
+    datasetCases: (datasetId: string) => ['datasets', datasetId, 'cases'] as const,
 }
 
 // Volume Hooks

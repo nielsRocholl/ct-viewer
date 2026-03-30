@@ -583,8 +583,8 @@ export function GlobalControls() {
                 </>
             )}
 
-            {/* Columns per row (pairs mode only) */}
-            {viewMode === 'pairs' && (
+            {/* Columns per row (pairs + data loaded) */}
+            {viewMode === 'pairs' && hasPairs && (
                 <div className="min-h-9 space-y-2">
                     <Label htmlFor="grid-columns" className="text-sm">
                         Columns per row
@@ -602,7 +602,7 @@ export function GlobalControls() {
                 </div>
             )}
 
-            {viewMode === 'pairs' && (
+            {viewMode === 'pairs' && hasPairs && (
                 <>
                     <div className="flex min-h-9 items-center justify-between">
                         <div className="flex items-center gap-2">
@@ -665,12 +665,10 @@ export function GlobalControls() {
                             id="global-sync"
                             checked={synchronized}
                             onCheckedChange={handleSyncToggle}
-                            disabled={!hasPairs}
                         />
                     </div>
 
-                    {hasPairs && (
-                        <div className="space-y-2">
+                    <div className="space-y-2">
                             <Label className="text-sm">Sync range</Label>
                             <div className="flex items-center gap-2">
                                 <Select
@@ -709,11 +707,9 @@ export function GlobalControls() {
                                     {outOfRangeCount} panel{outOfRangeCount !== 1 ? 's' : ''} out of range (clamped)
                                 </p>
                             )}
-                        </div>
-                    )}
+                    </div>
 
-                    {hasPairs && (
-                        <div className="flex min-h-9 items-center justify-between">
+                    <div className="flex min-h-9 items-center justify-between">
                             <Label htmlFor="snap-pairs" className="cursor-pointer text-sm">
                                 Snap to mask
                             </Label>
@@ -722,11 +718,9 @@ export function GlobalControls() {
                                 checked={snapToMask}
                                 onCheckedChange={handleSnapToMaskToggle}
                             />
-                        </div>
-                    )}
+                    </div>
 
-                    {hasPairs && (
-                        <div className="flex min-h-9 items-center justify-between">
+                    <div className="flex min-h-9 items-center justify-between">
                             <Label htmlFor="show-pair-controls" className="cursor-pointer text-sm">
                                 Show controls
                             </Label>
@@ -735,8 +729,7 @@ export function GlobalControls() {
                                 checked={pairArray.every((p) => pairControlsExpanded.get(p.pairId) !== false)}
                                 onCheckedChange={setAllPairsControlsExpanded}
                             />
-                        </div>
-                    )}
+                    </div>
 
                     <div className="min-h-9 space-y-2">
                         <Label htmlFor="global-slice" className="text-sm">
@@ -750,7 +743,7 @@ export function GlobalControls() {
                             value={[sliderValue]}
                             onValueChange={handleSliderChange}
                             onValueCommit={handleSliderCommit}
-                            disabled={!synchronized || !hasPairs}
+                            disabled={!synchronized}
                             className="w-full"
                         />
                         <p className="text-xs text-muted-foreground">
@@ -766,7 +759,6 @@ export function GlobalControls() {
                             variant="outline"
                             size="sm"
                             onClick={handleGlobalReset}
-                            disabled={!hasPairs}
                             className="gap-2"
                         >
                             <RotateCcw className="h-4 w-4" />

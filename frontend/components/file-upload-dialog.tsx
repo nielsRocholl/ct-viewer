@@ -34,6 +34,7 @@ import {
     createColorMapFromPalette,
     generateDistinctColor,
 } from '@/lib/color-utils'
+import { HexColorPopover } from './hex-color-popover'
 
 interface FileUploadDialogProps {
     trigger?: React.ReactNode
@@ -589,11 +590,9 @@ export function FileUploadDialog({ trigger, open: openProp, onOpenChange }: File
                                             <div className="flex flex-col gap-2">
                                                 <Label className="text-xs">Color & role</Label>
                                                 <div className="flex items-center gap-3">
-                                                    <input
-                                                        type="color"
+                                                    <HexColorPopover
                                                         value={seg.color}
-                                                        onChange={(e) => updateSeg(idx, { color: e.target.value })}
-                                                        className="h-8 w-10 cursor-pointer rounded border border-input"
+                                                        onChange={(hex) => updateSeg(idx, { color: hex })}
                                                         disabled={isUploading}
                                                     />
                                                     <div className="flex items-center gap-1">

@@ -184,10 +184,9 @@ def test_boundary_extraction_detects_interfaces(slice_extractor):
     # Row 5 (first row of label 2) should have boundaries
     assert np.any(boundary[5, :] > 0)
     
-    # Middle of each region (excluding edges) should not have boundaries
-    # Check interior pixels only (columns 1-8, avoiding left/right edges)
-    assert np.all(boundary[2, 1:-1] == 0)  # Middle of label 1
-    assert np.all(boundary[7, 1:-1] == 0)  # Middle of label 2
+    # Middle of each region should not be part of the contour (thick outline reaches +1 px from edges)
+    assert np.all(boundary[2, 2:-2] == 0)  # Middle of label 1
+    assert np.all(boundary[7, 2:-2] == 0)  # Middle of label 2
 
 
 def test_window_level_transformation(slice_extractor):

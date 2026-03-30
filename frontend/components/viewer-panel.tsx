@@ -2,8 +2,6 @@
 
 import { useCallback, useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-
-const CLICK_THRESHOLD_PX = 6
 import { useViewerStore, getPairSegVolumes } from '@/lib/store'
 import {
     queryKeys,
@@ -23,14 +21,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
 import { Input } from './ui/input'
-import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuTrigger,
-} from './ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
-import { ZoomIn, ZoomOut, RotateCcw, Palette, Download, Plus, Trash2, ChevronDown, ChevronUp, Crosshair } from 'lucide-react'
+import { ToggleGroup, ToggleGroupItem } from './ui/toggle-group'
+import { ZoomIn, ZoomOut, RotateCcw, Download, Plus, Trash2, ChevronDown, ChevronUp, Crosshair } from 'lucide-react'
 import {
     AXIS_MAP,
     convertIndexToPhysical,
@@ -40,6 +33,7 @@ import {
 import { fetchCTSlice, fetchSegmentationSlice, fetchWindowFromRoi } from '@/lib/api-client'
 import { cn, downloadCanvasAsJpeg } from '@/lib/utils'
 import { VolumeInfoCard } from './volume-info-card'
+import { HexColorPopover } from './hex-color-popover'
 import { toast } from 'sonner'
 import {
     createColorMapFromPalette,
@@ -51,6 +45,7 @@ import { computePairHealth } from '@/lib/health'
 import { WINDOW_PRESETS } from '@/lib/window-presets'
 import { useViewerCanvasWheel } from '@/lib/use-viewer-canvas-wheel'
 
+const CLICK_THRESHOLD_PX = 6
 const SEG_LIST_COLLAPSE_AT = 4
 const WINDOW_ROI_RADIUS_MM = 20
 const WINDOW_SMOOTH_NEW = 0.7
@@ -100,7 +95,6 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     const [isDragging, setIsDragging] = useState(false)
     const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
     const [mouseDownClient, setMouseDownClient] = useState<{ x: number; y: number } | null>(null)
-    const [selectedColor, setSelectedColor] = useState<string>(DEFAULT_LABEL_COLOR)
     const [presetId, setPresetId] = useState<string | null>(null)
     const [clickedXyz, setClickedXyz] = useState<{ x: number; y: number; z: number } | null>(null)
     const [clickedVoxel, setClickedVoxel] = useState<{ x: number; y: number; z: number } | null>(null)
@@ -538,7 +532,6 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
     const handleColorChange = useCallback(
         (color: string, segIndex: number) => {
             if (pair && segVolumes[segIndex]) {
-                setSelectedColor(color)
                 const newColorMap = new Map(segVolumes[segIndex].colorMap)
                 newColorMap.set(1, color)
                 updateSegColorMap(pairId, segIndex, newColorMap)
@@ -685,12 +678,6 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         (z) => updatePairZoom(pairId, z)
     )
 
-    const axialAspect = (() => {
-        if (!dims) return 1
-        const sx = (sp?.[0] ?? 1) * dims[0]
-        const sy = (sp?.[1] ?? 1) * dims[1]
-        return sx / sy
-    })()
     const sliceAspect = (() => {
         if (!dims) return 1
         const sx = (sp?.[0] ?? 1) * dims[0]
@@ -704,12 +691,16 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
         const el = frameRef.current
         if (!el) return
         const availW = Math.max(1, el.clientWidth)
-        const maxH = Math.round(window.innerHeight * 0.7)
-        const baseH = Math.min(maxH, availW / axialAspect)
-        const h = Math.min(baseH, availW / sliceAspect)
+        const top = el.getBoundingClientRect().top
+        const inset = 16 /* matches main content p-4 */
+        const availH = Math.max(96, window.innerHeight - top - inset)
+        const hIdeal = availW / sliceAspect
+        const h = Math.max(1, Math.min(Math.floor(hIdeal), Math.floor(availH)))
         const w = Math.max(1, Math.round(h * sliceAspect))
-        setFrameSize((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }))
-    }, [axialAspect, sliceAspect])
+        const we = (w >> 1) << 1
+        const he = (h >> 1) << 1
+        setFrameSize((prev) => (prev.width === we && prev.height === he ? prev : { width: we, height: he }))
+    }, [sliceAspect])
 
     useEffect(() => {
         updateFrameSize()
@@ -1341,28 +1332,53 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                                 const stats = pairMetadata?.seg_stats?.[i]
                                 const labelValues = stats?.label_values ?? []
                                 const multiLabel = labelValues.length > 1
-                                const colors = multiLabel
-                                    ? labelValues.map((lv) => seg.colorMap.get(lv) ?? DEFAULT_LABEL_COLOR)
-                                    : [seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR]
                                 return (
                                     <div
                                         key={i}
                                         className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-2"
                                     >
                                         <div className="flex min-w-0 flex-1 items-center gap-2">
-                                            <div
-                                                className="flex max-w-[5.5rem] shrink-0 gap-0.5 overflow-x-auto py-0.5 [scrollbar-width:thin]"
-                                                title={colors.length > 5 ? `${colors.length} labels` : undefined}
-                                            >
-                                                {colors.map((color, idx) => (
-                                                    <span
-                                                        key={idx}
-                                                        className="h-3 w-3 shrink-0 rounded border border-border"
-                                                        style={{ backgroundColor: color }}
-                                                        aria-hidden
-                                                    />
-                                                ))}
-                                            </div>
+                                            {multiLabel ? (
+                                                <div
+                                                    className="flex max-w-[5.5rem] shrink-0 gap-0.5 overflow-x-auto py-0.5 [scrollbar-width:thin]"
+                                                    title={
+                                                        labelValues.length > 5
+                                                            ? `${labelValues.length} labels`
+                                                            : undefined
+                                                    }
+                                                >
+                                                    {labelValues
+                                                        .slice()
+                                                        .sort((a, b) => a - b)
+                                                        .map((labelVal) => (
+                                                            <HexColorPopover
+                                                                key={labelVal}
+                                                                value={
+                                                                    seg.colorMap.get(labelVal) ??
+                                                                    DEFAULT_LABEL_COLOR
+                                                                }
+                                                                onChange={(hex) =>
+                                                                    handleSegLabelColorChange(
+                                                                        i,
+                                                                        labelVal,
+                                                                        hex
+                                                                    )
+                                                                }
+                                                                className="h-6 w-6 shrink-0"
+                                                                ariaLabel={`Color for label ${labelVal}`}
+                                                                title={`Label ${labelVal}`}
+                                                            />
+                                                        ))}
+                                                </div>
+                                            ) : (
+                                                <HexColorPopover
+                                                    value={
+                                                        seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR
+                                                    }
+                                                    onChange={(hex) => handleColorChange(hex, i)}
+                                                    className="h-7 w-7 shrink-0"
+                                                />
+                                            )}
                                             <Input
                                                 value={seg.name ?? ''}
                                                 onChange={(e) => updateSegName(pairId, i, e.target.value)}
@@ -1383,7 +1399,7 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                                                 </Button>
                                                 <Button
                                                     type="button"
-                                                    variant={seg.role === 'pred' ? 'secondary' : 'outline'}
+                                                    variant={seg.role === 'pred' ? 'default' : 'outline'}
                                                     size="sm"
                                                     className="h-5 px-1.5 text-[10px]"
                                                     onClick={() => updateSegRole(pairId, i, seg.role === 'pred' ? undefined : 'pred')}
@@ -1395,93 +1411,31 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                                                 checked={seg.visible !== false}
                                                 onCheckedChange={(v) => updateSegVisible(pairId, i, v)}
                                             />
-                                            <DropdownMenu>
-                                                <DropdownMenuTrigger asChild>
-                                                    <Button variant="outline" size="sm">
-                                                        {(seg.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
-                                                    </Button>
-                                                </DropdownMenuTrigger>
-                                                <DropdownMenuContent>
-                                                    <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'filled')}>
-                                                        Filled
-                                                    </DropdownMenuItem>
-                                                    <DropdownMenuItem onClick={() => handleMaskModeChange(i, 'boundary')}>
-                                                        Boundary
-                                                    </DropdownMenuItem>
-                                                </DropdownMenuContent>
-                                            </DropdownMenu>
-                                            <Popover>
-                                                <PopoverTrigger asChild>
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-8 w-8 shrink-0"
-                                                        onClick={() =>
-                                                            setSelectedColor(
-                                                                multiLabel
-                                                                    ? (seg.colorMap.get(labelValues[0]) ?? DEFAULT_LABEL_COLOR)
-                                                                    : (seg.colorMap.get(1) ?? DEFAULT_LABEL_COLOR)
-                                                            )
-                                                        }
-                                                    >
-                                                        <Palette className="h-4 w-4" />
-                                                    </Button>
-                                                </PopoverTrigger>
-                                                <PopoverContent className="w-52">
-                                                    {multiLabel ? (
-                                                        <div className="space-y-2">
-                                                            <div className="text-xs font-medium text-muted-foreground">
-                                                                Label colors
-                                                            </div>
-                                                            <div className="max-h-48 space-y-1.5 overflow-y-auto">
-                                                                {labelValues
-                                                                    .slice()
-                                                                    .sort((a, b) => a - b)
-                                                                    .map((labelVal) => (
-                                                                        <div
-                                                                            key={labelVal}
-                                                                            className="flex items-center gap-2"
-                                                                        >
-                                                                            <span
-                                                                                className="h-4 w-4 shrink-0 rounded border border-border"
-                                                                                style={{
-                                                                                    backgroundColor:
-                                                                                        seg.colorMap.get(labelVal) ??
-                                                                                        DEFAULT_LABEL_COLOR,
-                                                                                }}
-                                                                            />
-                                                                            <span className="w-6 shrink-0 text-xs tabular-nums">
-                                                                                {labelVal}
-                                                                            </span>
-                                                                            <input
-                                                                                type="color"
-                                                                                value={
-                                                                                    seg.colorMap.get(labelVal) ??
-                                                                                    DEFAULT_LABEL_COLOR
-                                                                                }
-                                                                                onChange={(e) =>
-                                                                                    handleSegLabelColorChange(
-                                                                                        i,
-                                                                                        labelVal,
-                                                                                        e.target.value
-                                                                                    )
-                                                                                }
-                                                                                className="h-6 min-w-0 flex-1 cursor-pointer rounded"
-                                                                            />
-                                                                        </div>
-                                                                    ))}
-                                                            </div>
-                                                        </div>
-                                                    ) : (
-                                                        <input
-                                                            type="color"
-                                                            value={selectedColor}
-                                                            onChange={(e) => handleColorChange(e.target.value, i)}
-                                                            className="h-8 w-full cursor-pointer rounded"
-                                                        />
-                                                    )}
-                                                </PopoverContent>
-                                            </Popover>
+                                            <ToggleGroup
+                                                type="single"
+                                                value={seg.mode ?? 'filled'}
+                                                onValueChange={(v) => {
+                                                    if (v === 'filled' || v === 'boundary')
+                                                        handleMaskModeChange(i, v)
+                                                }}
+                                                className="inline-flex h-5 shrink-0 gap-0 overflow-hidden rounded-md border border-input bg-background p-0 shadow-sm"
+                                                aria-label="Mask display: solid fill or boundary outline"
+                                            >
+                                                <ToggleGroupItem
+                                                    value="filled"
+                                                    title="Solid fill inside the segmentation"
+                                                    className="h-5 min-w-0 shrink-0 rounded-none border-0 px-1.5 text-[10px] font-medium text-muted-foreground shadow-none data-[state=on]:bg-accent data-[state=on]:text-accent-foreground"
+                                                >
+                                                    Fill
+                                                </ToggleGroupItem>
+                                                <ToggleGroupItem
+                                                    value="boundary"
+                                                    title="Draw only the mask boundary (contour)"
+                                                    className="h-5 min-w-0 shrink-0 rounded-none border-0 border-l border-input px-1.5 text-[10px] font-medium text-muted-foreground shadow-none data-[state=on]:bg-accent data-[state=on]:text-accent-foreground"
+                                                >
+                                                    Outline
+                                                </ToggleGroupItem>
+                                            </ToggleGroup>
                                             {segVolumes.length > 1 && (
                                                 <Button
                                                     variant="ghost"

@@ -1,8 +1,9 @@
 'use client'
 
-import { useCallback, useState, useEffect, useRef, useMemo } from 'react'
+import { useCallback, useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useViewerStore, type DatasetCaseState } from '@/lib/store'
+import { useViewerStore } from '@/lib/store'
+import { mergeSegDisplay, type DatasetSeg } from '@/lib/dataset-seg-merge'
 import { queryKeys, useCTSlice, useSegmentationSlices, useVolumeMetadata, useVolumeMetadatas, useDice } from '@/lib/api-hooks'
 import { CanvasRenderer, type CanvasRendererHandle } from './canvas-renderer'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
@@ -13,13 +14,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Switch } from './ui/switch'
 import { Label } from './ui/label'
 import { Input } from './ui/input'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './ui/dropdown-menu'
+import { ToggleGroup, ToggleGroupItem } from './ui/toggle-group'
 import {
     ZoomIn,
     ZoomOut,
     RotateCcw,
     Download,
-    Palette,
     ChevronLeft,
     ChevronRight,
     ChevronDown,
@@ -40,11 +40,12 @@ import {
     generateDistinctColor,
     DEFAULT_PRED_COLOR,
     createColorMapFromPalette,
-    colorMapToRecord,
     recordToColorMap,
 } from '@/lib/color-utils'
 import { cn, downloadCanvasAsJpeg } from '@/lib/utils'
 import { VolumeInfoCard } from './volume-info-card'
+import { DatasetCaseNav } from './dataset-case-nav'
+import { HexColorPopover } from './hex-color-popover'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import { computePairHealth } from '@/lib/health'
 import { WINDOW_PRESETS } from '@/lib/window-presets'
@@ -70,39 +71,6 @@ const healthExplain = (label: string): string => {
     if (label === 'CT anisotropy') return 'Max spacing / min spacing ratio is within range.'
     if (label === 'CT orientation') return 'Direction matrix is orthonormal.'
     return 'Check status.'
-}
-
-type DatasetSeg = DatasetCaseState['segVolumes'][number]
-
-function mergeSegDisplay(prev: DatasetSeg[] | null | undefined, next: DatasetSeg[]): DatasetSeg[] {
-    return next.map((s, i) => {
-        const prevSeg = prev?.[i]
-        const labelValues = s.labelValues ?? []
-        const multiLabel = labelValues.length > 1
-        let colorMap: Record<string, string> | undefined
-        if (multiLabel) {
-            const baseMap = createColorMapFromPalette(labelValues, 'colorblind', i)
-            const baseRecord = colorMapToRecord(baseMap)
-            const prevRecord = prevSeg?.colorMap ?? {}
-            colorMap = { ...baseRecord }
-            labelValues.forEach((lv) => {
-                const key = String(lv)
-                if (prevRecord[key]) colorMap![key] = prevRecord[key]
-            })
-        }
-        return {
-            ...s,
-            color:
-                !multiLabel
-                    ? (s.color ??
-                        prevSeg?.color ??
-                        (s.role === 'pred' ? DEFAULT_PRED_COLOR : generateDistinctColor(i, next.length)))
-                    : undefined,
-            colorMap: multiLabel ? colorMap : undefined,
-            visible: s.visible ?? prevSeg?.visible ?? true,
-            mode: s.mode ?? prevSeg?.mode ?? 'filled',
-        }
-    })
 }
 
 export function DatasetViewerPanel() {
@@ -132,11 +100,13 @@ export function DatasetViewerPanel() {
     const [mouseDownClient, setMouseDownClient] = useState<{ x: number; y: number } | null>(null)
     const [clickedXyz, setClickedXyz] = useState<{ x: number; y: number; z: number } | null>(null)
     const [clickedVoxel, setClickedVoxel] = useState<{ x: number; y: number; z: number } | null>(null)
+    const viewerRowRef = useRef<HTMLDivElement>(null)
+    const controlsCardRef = useRef<HTMLDivElement>(null)
+    const canvasBudgetRef = useRef<HTMLDivElement>(null)
     const frameRef = useRef<HTMLDivElement>(null)
     const canvasContainerRef = useRef<HTMLDivElement>(null)
     const sliceWheelRef = useRef<HTMLDivElement>(null)
     const [frameSize, setFrameSize] = useState({ width: 512, height: 512 })
-    const lastSizeRef = useRef({ width: 512, height: 512 })
     const [canvasSize, setCanvasSize] = useState({ width: 512, height: 512 })
     const canvasRendererRef = useRef<CanvasRendererHandle>(null)
     const snapRequestRef = useRef(0)
@@ -243,6 +213,12 @@ export function DatasetViewerPanel() {
         return preferred?.volumeId ?? null
     }, [segList])
 
+    const segVolumeIdsKey = (datasetCase?.segVolumes ?? []).map((s) => s.volumeId).join('\0')
+    const snapMaskComponentCount =
+        volumeId == null
+            ? 0
+            : (datasetCase?.segVolumes ?? []).find((s) => s.volumeId === volumeId)?.componentCount ?? 0
+
     const gtVolumeId = segList.find((s) => s.role === 'gt')?.volumeId ?? null
     const predVolumeId = segList.find((s) => s.role === 'pred')?.volumeId ?? null
     const { data: diceData } = useDice(gtVolumeId, predVolumeId)
@@ -270,7 +246,7 @@ export function DatasetViewerPanel() {
                 })
         }
 
-        if (snapToMask && volumeId && datasetCase) {
+        if (snapToMask && volumeId) {
             trySnap(0)
         } else {
             setSliceIndex(0)
@@ -278,22 +254,21 @@ export function DatasetViewerPanel() {
         return () => {
             if (retryTimer) clearTimeout(retryTimer)
         }
-    }, [datasetCase?.caseIndex, datasetCase?.imageVolumeId, datasetCase?.segVolumes, snapToMask, volumeId, datasetCase])
+    }, [datasetCase?.caseIndex, datasetCase?.imageVolumeId, segVolumeIdsKey, snapToMask, volumeId])
 
     useEffect(() => {
         setComponentIndexByVolumeId({})
     }, [datasetCase?.caseIndex, datasetCase?.caseId])
 
     useEffect(() => {
-        if (!snapToMask || !volumeId || !datasetCase) {
+        if (!snapToMask || !volumeId) {
             return
         }
         if (orientation === 'axial') {
             return
         }
         const compIdx = componentIndexByVolumeId[volumeId]
-        const seg = segList.find((s) => s.volumeId === volumeId)
-        const total = seg?.componentCount ?? 0
+        const total = snapMaskComponentCount
         if (compIdx != null && total > 1 && compIdx >= 1 && compIdx <= total) {
             fetchSliceForComponent(volumeId, orientation, compIdx)
                 .then((data) => setSliceIndex(data.slice_index))
@@ -303,50 +278,12 @@ export function DatasetViewerPanel() {
                 .then((data) => setSliceIndex(data.slice_index))
                 .catch(() => {})
         }
-    }, [snapToMask, volumeId, orientation, datasetCase, componentIndexByVolumeId, segList])
+    }, [snapToMask, volumeId, orientation, componentIndexByVolumeId, snapMaskComponentCount])
 
     useEffect(() => {
         setClickedXyz(null)
         setClickedVoxel(null)
     }, [sliceIndex])
-
-    useEffect(() => {
-        const el = canvasContainerRef.current
-        if (!el) return
-        let rafId = 0
-        let debounceTimer: ReturnType<typeof setTimeout> | null = null
-        const MIN_DELTA = 16
-        const ro = new ResizeObserver(() => {
-            if (debounceTimer) clearTimeout(debounceTimer)
-            debounceTimer = setTimeout(() => {
-                if (rafId) cancelAnimationFrame(rafId)
-                rafId = requestAnimationFrame(() => {
-                    rafId = 0
-                    const cw = el.clientWidth
-                    const ch = el.clientHeight
-                    const w = Math.max(1, (cw >> 1) << 1)
-                    const h = Math.max(1, (ch >> 1) << 1)
-                    const last = lastSizeRef.current
-                    if (Math.abs(w - last.width) >= MIN_DELTA || Math.abs(h - last.height) >= MIN_DELTA) {
-                        lastSizeRef.current = { width: w, height: h }
-                        setCanvasSize({ width: w, height: h })
-                    }
-                })
-            }, 100)
-        })
-        ro.observe(el)
-        const w = Math.max(1, (el.clientWidth >> 1) << 1)
-        const h = Math.max(1, (el.clientHeight >> 1) << 1)
-        if (w !== 512 || h !== 512) {
-            lastSizeRef.current = { width: w, height: h }
-            setCanvasSize({ width: w, height: h })
-        }
-        return () => {
-            if (rafId) cancelAnimationFrame(rafId)
-            if (debounceTimer) clearTimeout(debounceTimer)
-            ro.disconnect()
-        }
-    }, [])
 
     const { data: imageMeta } = useVolumeMetadata(datasetCase?.imageVolumeId ?? null)
     const segIds = segList.map((s) => s.volumeId)
@@ -356,12 +293,6 @@ export function DatasetViewerPanel() {
     const dims = imageMeta?.dimensions
     const sp = imageMeta?.spacing
     const maxSliceIndex = dims?.[axis] != null ? dims[axis] - 1 : 0
-    const axialAspect = (() => {
-        if (!dims) return 1
-        const sx = (sp?.[0] ?? 1) * dims[0]
-        const sy = (sp?.[1] ?? 1) * dims[1]
-        return sx / sy
-    })()
     const sliceAspect = (() => {
         if (!dims) return 1
         const sx = (sp?.[0] ?? 1) * dims[0]
@@ -372,32 +303,47 @@ export function DatasetViewerPanel() {
         return sx / sz
     })()
     const updateFrameSize = useCallback(() => {
-        const el = frameRef.current
-        if (!el) return
-        const availW = Math.max(1, el.clientWidth)
-        const maxH = Math.round(window.innerHeight * 0.7)
-        const baseH = Math.min(maxH, availW / axialAspect)
-        const h = Math.min(baseH, availW / sliceAspect)
-        const w = Math.max(1, Math.round(h * sliceAspect))
+        const row = viewerRowRef.current
+        const budget = canvasBudgetRef.current
+        if (!row || !budget) return
+        const chRaw = budget.clientHeight
+        if (chRaw < 2) return
+        const ctrlW = controlsCardRef.current?.offsetWidth ?? 0
+        const gapPx = 16
+        const maxW = Math.max(1, row.clientWidth - ctrlW - 3 * gapPx)
+        const ch = Math.max(1, chRaw)
+        const ar = sliceAspect
+        let w = Math.min(maxW, Math.floor(ch * ar))
+        let h = Math.max(1, Math.floor(w / ar))
+        if (h > ch) {
+            h = ch
+            w = Math.max(1, Math.floor(h * ar))
+        }
+        w = Math.max(1, (w >> 1) << 1)
+        h = Math.max(1, (h >> 1) << 1)
         setFrameSize((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }))
-    }, [axialAspect, sliceAspect])
+        setCanvasSize((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }))
+    }, [sliceAspect])
 
     useEffect(() => {
         updateFrameSize()
     }, [updateFrameSize])
 
-    useEffect(() => {
-        const el = frameRef.current
-        if (!el) return
+    useLayoutEffect(() => {
         let rafId = 0
-        const ro = new ResizeObserver(() => {
+        const schedule = () => {
             if (rafId) cancelAnimationFrame(rafId)
             rafId = requestAnimationFrame(() => {
                 rafId = 0
                 updateFrameSize()
             })
-        })
-        ro.observe(el)
+        }
+        const ro = new ResizeObserver(schedule)
+        const row = viewerRowRef.current
+        const budget = canvasBudgetRef.current
+        if (row) ro.observe(row)
+        if (budget) ro.observe(budget)
+        schedule()
         return () => {
             if (rafId) cancelAnimationFrame(rafId)
             ro.disconnect()
@@ -813,42 +759,38 @@ export function DatasetViewerPanel() {
         { pass: 0, warn: 0, fail: 0 }
     )
     return (
-        <div className="space-y-4">
-            <div className="flex gap-4 items-stretch min-h-[75vh]">
-                <Card className="flex-1 min-w-0 flex flex-col overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col">
+            <div ref={viewerRowRef} className="flex min-h-0 min-w-0 flex-1 gap-4">
+                <div className="min-h-0 min-w-0 flex-1 shrink" aria-hidden />
+                <Card className="flex h-full w-fit max-w-full shrink-0 flex-col overflow-hidden">
                     <CardHeader className="shrink-0">
-                        <CardTitle
-                            className="text-base font-semibold tracking-tight truncate"
-                            title={`${datasetCase.caseId} (${datasetCase.caseIndex + 1} / ${datasetCase.caseCount})`}
-                        >
-                            {datasetCase.caseId} ({datasetCase.caseIndex + 1} / {datasetCase.caseCount})
-                        </CardTitle>
+                        <div className="min-w-0" style={{ width: frameSize.width }}>
+                            <CardTitle
+                                className="truncate text-base font-semibold tracking-tight"
+                                title={`${datasetCase.caseId} (${datasetCase.caseIndex + 1} / ${datasetCase.caseCount})`}
+                            >
+                                {datasetCase.caseId}
+                            </CardTitle>
+                        </div>
                     </CardHeader>
-                    <CardContent className="space-y-4">
-                        {datasetCase.warnings && datasetCase.warnings.length > 0 && (
-                            <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
-                                <div className="font-medium mb-1">Warnings</div>
-                                <ul className="list-disc pl-4 space-y-1">
-                                    {datasetCase.warnings.map((w, i) => (
-                                        <li key={`${w}-${i}`}>{w}</li>
-                                    ))}
-                                </ul>
-                            </div>
-                        )}
+                    <CardContent className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
                         {cleanDatasetMode && (
-                            <div className="flex items-center justify-end gap-2 border-t pt-3">
+                            <div className="flex shrink-0 items-center justify-end gap-2 border-t pt-3">
                                 <Button variant="outline" onClick={() => handleDecision('reject')}>
                                     Reject
                                 </Button>
                                 <Button onClick={() => handleDecision('accept')}>Accept</Button>
                             </div>
                         )}
-                        <div className="w-full space-y-4">
+                        <div
+                            className="flex min-h-0 min-w-0 flex-1 flex-col gap-4"
+                            style={{ width: frameSize.width }}
+                        >
                             {(imageMeta || segMetas.some((m) => m)) && (
-                                <div className="flex items-center gap-2">
+                                <div className="flex shrink-0 flex-wrap items-center gap-2">
                                     <Popover open={volumeInfoOpen} onOpenChange={setVolumeInfoOpen}>
                                         <PopoverTrigger asChild>
-                                            <Button variant="outline" size="sm" className="flex-1 text-xs">
+                                            <Button variant="outline" size="sm" className="min-w-0 shrink text-xs">
                                                 Volume info
                                             </Button>
                                         </PopoverTrigger>
@@ -967,65 +909,83 @@ export function DatasetViewerPanel() {
                                 </div>
                             )}
                             <div
-                                ref={frameRef}
-                                className="mx-auto w-full flex items-center justify-center"
-                                style={{ minHeight: frameSize.height }}
+                                ref={canvasBudgetRef}
+                                className="flex min-h-0 min-w-0 flex-1 flex-col"
                             >
                                 <div
-                                    ref={canvasContainerRef}
-                                    className="relative min-h-0"
-                                    style={{ width: frameSize.width, height: frameSize.height }}
+                                    ref={frameRef}
+                                    className="flex min-h-0 min-w-0 w-full flex-1 items-center justify-center"
                                 >
                                     <div
-                                        ref={sliceWheelRef}
-                                        className="absolute inset-0 cursor-move"
-                                        onMouseDown={handleMouseDown}
-                                        onMouseMove={handleMouseMove}
-                                        onMouseUp={handleMouseUp}
-                                        onMouseLeave={handleMouseUp}
+                                        ref={canvasContainerRef}
+                                        className="relative min-h-0 shrink-0"
+                                        style={{ width: frameSize.width, height: frameSize.height }}
                                     >
-                                        <CanvasRenderer
-                                            ref={canvasRendererRef}
-                                            ctSliceUrl={ctSliceUrl ?? null}
-                                            segmentationSliceUrl={null}
-                                            overlayMode="filled"
-                                            overlayOpacity={overlayOpacity}
-                                            overlayVisible={segList.some((s) => s.visible !== false)}
-                                            colorMap={new Map()}
-                                            overlayLayers={segList.map((s, i) => {
-                                                const multiLabelColorMap = segColorMaps.get(s.volumeId)
-                                                const colorMap = multiLabelColorMap ?? new Map([[1, getSegColor(s, i)]])
-                                                return {
-                                                    url: segSliceUrls[i] ?? null,
-                                                    colorMap,
-                                                    opacity: overlayOpacity,
-                                                    visible: s.visible !== false,
-                                                }
-                                            })}
-                                            zoom={zoom}
-                                            pan={pan}
-                                            windowLevel={windowLevel}
-                                            windowWidth={windowWidth}
-                                            width={canvasSize.width}
-                                            height={canvasSize.height}
-                                        />
-                                        {clickedXyz && clickedVoxel && (
-                                            <div className="absolute top-2 right-2 text-xs font-mono bg-black/70 text-white px-2 py-1 rounded pointer-events-none space-y-0.5">
-                                                <div>physical: x {clickedXyz.x.toFixed(1)}  y {clickedXyz.y.toFixed(1)}  z {clickedXyz.z.toFixed(1)} mm</div>
-                                                <div>voxel: x {clickedVoxel.x}  y {clickedVoxel.y}  z {clickedVoxel.z}</div>
-                                            </div>
-                                        )}
+                                        <div
+                                            ref={sliceWheelRef}
+                                            className="absolute inset-0 cursor-move"
+                                            onMouseDown={handleMouseDown}
+                                            onMouseMove={handleMouseMove}
+                                            onMouseUp={handleMouseUp}
+                                            onMouseLeave={handleMouseUp}
+                                        >
+                                            <CanvasRenderer
+                                                ref={canvasRendererRef}
+                                                ctSliceUrl={ctSliceUrl ?? null}
+                                                segmentationSliceUrl={null}
+                                                overlayMode="filled"
+                                                overlayOpacity={overlayOpacity}
+                                                overlayVisible={segList.some((s) => s.visible !== false)}
+                                                colorMap={new Map()}
+                                                overlayLayers={segList.map((s, i) => {
+                                                    const multiLabelColorMap = segColorMaps.get(s.volumeId)
+                                                    const colorMap = multiLabelColorMap ?? new Map([[1, getSegColor(s, i)]])
+                                                    return {
+                                                        url: segSliceUrls[i] ?? null,
+                                                        colorMap,
+                                                        opacity: overlayOpacity,
+                                                        visible: s.visible !== false,
+                                                    }
+                                                })}
+                                                zoom={zoom}
+                                                pan={pan}
+                                                windowLevel={windowLevel}
+                                                windowWidth={windowWidth}
+                                                width={canvasSize.width}
+                                                height={canvasSize.height}
+                                            />
+                                            {clickedXyz && clickedVoxel && (
+                                                <div className="absolute top-2 right-2 space-y-0.5 rounded bg-black/70 px-2 py-1 font-mono text-xs text-white pointer-events-none">
+                                                    <div>physical: x {clickedXyz.x.toFixed(1)}  y {clickedXyz.y.toFixed(1)}  z {clickedXyz.z.toFixed(1)} mm</div>
+                                                    <div>voxel: x {clickedVoxel.x}  y {clickedVoxel.y}  z {clickedVoxel.z}</div>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
                         </div>
                     </CardContent>
                 </Card>
-                <Card className="flex-[0_0_42%] min-w-0 flex flex-col overflow-hidden">
-                    <CardHeader className="shrink-0">
+                <Card
+                    ref={controlsCardRef}
+                    className="flex w-full max-w-[28rem] shrink-0 flex-col overflow-hidden"
+                >
+                    <CardHeader className="flex shrink-0 flex-col gap-3 space-y-0">
                         <CardTitle className="text-base font-semibold tracking-tight">Controls</CardTitle>
+                        <DatasetCaseNav className="w-full justify-center" />
                     </CardHeader>
                     <CardContent className="min-w-0 space-y-5 flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+                        {datasetCase.warnings && datasetCase.warnings.length > 0 && (
+                            <div className="shrink-0 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+                                <div className="mb-1 font-medium">Warnings</div>
+                                <ul className="list-disc space-y-1 pl-4">
+                                    {datasetCase.warnings.map((w, i) => (
+                                        <li key={`${w}-${i}`}>{w}</li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
                         <div className="flex min-h-9 items-center justify-center">
                             <div className="inline-flex min-w-0 rounded-xl border border-input bg-muted/30 p-0.5" role="group" aria-label="View orientation">
                                 {(['axial', 'sagittal', 'coronal'] as const).map((ori) => (
@@ -1193,28 +1153,43 @@ export function DatasetViewerPanel() {
                             >
                             {segList.map((s, i) => {
                                 const multiLabelColorMap = segColorMaps.get(s.volumeId)
-                                const colors = multiLabelColorMap
-                                    ? Array.from(multiLabelColorMap.values())
-                                    : [getSegColor(s, i)]
                                 return (
                                     <div
                                         key={`${s.volumeId}-${i}`}
                                         className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-2"
                                     >
                                         <div className="flex min-w-0 flex-1 items-center gap-2">
-                                            <div
-                                                className="flex max-w-[5.5rem] shrink-0 gap-0.5 overflow-x-auto py-0.5 [scrollbar-width:thin]"
-                                                title={colors.length > 5 ? `${colors.length} labels` : undefined}
-                                            >
-                                                {colors.map((color, idx) => (
-                                                    <span
-                                                        key={idx}
-                                                        className="h-3 w-3 shrink-0 rounded border border-border"
-                                                        style={{ backgroundColor: color }}
-                                                        aria-hidden
-                                                    />
-                                                ))}
-                                            </div>
+                                            {multiLabelColorMap ? (
+                                                <div
+                                                    className="flex max-w-[5.5rem] shrink-0 gap-0.5 overflow-x-auto py-0.5 [scrollbar-width:thin]"
+                                                    title={
+                                                        multiLabelColorMap.size > 5
+                                                            ? `${multiLabelColorMap.size} labels`
+                                                            : undefined
+                                                    }
+                                                >
+                                                    {Array.from(multiLabelColorMap.entries())
+                                                        .sort(([a], [b]) => a - b)
+                                                        .map(([labelVal, color]) => (
+                                                            <HexColorPopover
+                                                                key={labelVal}
+                                                                value={color}
+                                                                onChange={(hex) =>
+                                                                    updateSegLabelColor(i, labelVal, hex)
+                                                                }
+                                                                className="h-6 w-6 shrink-0"
+                                                                ariaLabel={`Color for label ${labelVal}`}
+                                                                title={`Label ${labelVal}`}
+                                                            />
+                                                        ))}
+                                                </div>
+                                            ) : (
+                                                <HexColorPopover
+                                                    value={getSegColor(s, i)}
+                                                    onChange={(hex) => updateSegColor(i, hex)}
+                                                    className="h-7 w-7 shrink-0"
+                                                />
+                                            )}
                                             <Input
                                                 value={s.name ?? ''}
                                                 onChange={(e) => updateSegName(i, e.target.value)}
@@ -1241,7 +1216,7 @@ export function DatasetViewerPanel() {
                                                 </Button>
                                                 <Button
                                                     type="button"
-                                                    variant={s.role === 'pred' ? 'secondary' : 'outline'}
+                                                    variant={s.role === 'pred' ? 'default' : 'outline'}
                                                     size="sm"
                                                     className="h-5 px-1.5 text-[10px]"
                                                     onClick={() => updateSegRole(i, s.role === 'pred' ? undefined : 'pred')}
@@ -1253,74 +1228,30 @@ export function DatasetViewerPanel() {
                                                 checked={s.visible !== false}
                                                 onCheckedChange={(v) => updateSegVisible(i, v)}
                                             />
-                                            <DropdownMenu>
-                                                <DropdownMenuTrigger asChild>
-                                                    <Button variant="outline" size="sm">
-                                                        {(s.mode ?? 'filled') === 'filled' ? 'Filled' : 'Boundary'}
-                                                    </Button>
-                                                </DropdownMenuTrigger>
-                                                <DropdownMenuContent>
-                                                    <DropdownMenuItem onClick={() => updateSegMode(i, 'filled')}>
-                                                        Filled
-                                                    </DropdownMenuItem>
-                                                    <DropdownMenuItem onClick={() => updateSegMode(i, 'boundary')}>
-                                                        Boundary
-                                                    </DropdownMenuItem>
-                                                </DropdownMenuContent>
-                                            </DropdownMenu>
-                                            <Popover>
-                                                <PopoverTrigger asChild>
-                                                    <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0">
-                                                        <Palette className="h-4 w-4" />
-                                                    </Button>
-                                                </PopoverTrigger>
-                                                <PopoverContent className="w-52">
-                                                    {multiLabelColorMap ? (
-                                                        <div className="space-y-2">
-                                                            <div className="text-xs font-medium text-muted-foreground">
-                                                                Label colors
-                                                            </div>
-                                                            <div className="max-h-48 space-y-1.5 overflow-y-auto">
-                                                                {Array.from(multiLabelColorMap.entries())
-                                                                    .sort(([a], [b]) => a - b)
-                                                                    .map(([labelVal, color]) => (
-                                                                        <div
-                                                                            key={labelVal}
-                                                                            className="flex items-center gap-2"
-                                                                        >
-                                                                            <span
-                                                                                className="h-4 w-4 shrink-0 rounded border border-border"
-                                                                                style={{ backgroundColor: color }}
-                                                                            />
-                                                                            <span className="w-6 shrink-0 text-xs tabular-nums">
-                                                                                {labelVal}
-                                                                            </span>
-                                                                            <input
-                                                                                type="color"
-                                                                                value={color}
-                                                                                onChange={(e) =>
-                                                                                    updateSegLabelColor(
-                                                                                        i,
-                                                                                        labelVal,
-                                                                                        e.target.value
-                                                                                    )
-                                                                                }
-                                                                                className="h-6 min-w-0 flex-1 cursor-pointer rounded"
-                                                                            />
-                                                                        </div>
-                                                                    ))}
-                                                            </div>
-                                                        </div>
-                                                    ) : (
-                                                        <input
-                                                            type="color"
-                                                            value={getSegColor(s, i)}
-                                                            onChange={(e) => updateSegColor(i, e.target.value)}
-                                                            className="h-8 w-full cursor-pointer rounded"
-                                                        />
-                                                    )}
-                                                </PopoverContent>
-                                            </Popover>
+                                            <ToggleGroup
+                                                type="single"
+                                                value={s.mode ?? 'filled'}
+                                                onValueChange={(v) => {
+                                                    if (v === 'filled' || v === 'boundary') updateSegMode(i, v)
+                                                }}
+                                                className="inline-flex h-5 shrink-0 gap-0 overflow-hidden rounded-md border border-input bg-background p-0 shadow-sm"
+                                                aria-label="Mask display: solid fill or boundary outline"
+                                            >
+                                                <ToggleGroupItem
+                                                    value="filled"
+                                                    title="Solid fill inside the segmentation"
+                                                    className="h-5 min-w-0 shrink-0 rounded-none border-0 px-1.5 text-[10px] font-medium text-muted-foreground shadow-none data-[state=on]:bg-accent data-[state=on]:text-accent-foreground"
+                                                >
+                                                    Fill
+                                                </ToggleGroupItem>
+                                                <ToggleGroupItem
+                                                    value="boundary"
+                                                    title="Draw only the mask boundary (contour)"
+                                                    className="h-5 min-w-0 shrink-0 rounded-none border-0 border-l border-input px-1.5 text-[10px] font-medium text-muted-foreground shadow-none data-[state=on]:bg-accent data-[state=on]:text-accent-foreground"
+                                                >
+                                                    Outline
+                                                </ToggleGroupItem>
+                                            </ToggleGroup>
                                         </div>
                                     </div>
                                 )
@@ -1355,132 +1286,8 @@ export function DatasetViewerPanel() {
                         </Button>
                     </CardContent>
                 </Card>
+                <div className="min-h-0 min-w-0 flex-1 shrink" aria-hidden />
             </div>
-        </div>
-    )
-}
-
-export function DatasetNav() {
-    const datasetCase = useViewerStore((s) => s.datasetCase)
-    const setDatasetCase = useViewerStore((s) => s.setDatasetCase)
-    const [loading, setLoading] = useState(false)
-
-    const go = useCallback(
-        async (delta: number) => {
-            if (!datasetCase || loading) return
-            const nextIndex = datasetCase.caseIndex + delta
-            if (nextIndex < 0 || nextIndex >= datasetCase.caseCount) return
-            setLoading(true)
-            try {
-                const res = await openDatasetCase(datasetCase.datasetId, {
-                    case_index: nextIndex,
-                })
-                const segVolumesRaw =
-                    res.seg_volume_ids?.map((s) => ({
-                        volumeId: s.volume_id,
-                        role: s.role,
-                        name: s.name,
-                        allBackground: s.all_background ?? null,
-                        componentCount: s.component_count ?? null,
-                        multiLabel: s.multi_label ?? null,
-                        nonzeroLabelCount: s.nonzero_label_count ?? null,
-                        labelValues: s.label_values ?? null,
-                    })) ??
-                    [
-                        ...(res.label_volume_id
-                            ? [{
-                                volumeId: res.label_volume_id,
-                                role: 'gt' as const,
-                                name: 'Label',
-                                allBackground: res.label_all_background ?? null,
-                                componentCount: null,
-                                multiLabel: null,
-                                nonzeroLabelCount: null,
-                                labelValues: null,
-                            }]
-                            : []),
-                        ...(res.pred_volume_id
-                            ? [{
-                                volumeId: res.pred_volume_id,
-                                role: 'pred' as const,
-                                name: 'Prediction',
-                                allBackground: null,
-                                componentCount: null,
-                                multiLabel: null,
-                                nonzeroLabelCount: null,
-                                labelValues: null,
-                            }]
-                            : []),
-                    ]
-                const segVolumes = mergeSegDisplay(datasetCase.segVolumes, segVolumesRaw)
-                setDatasetCase({
-                    datasetId: datasetCase.datasetId,
-                    caseIndex: res.case_index,
-                    caseCount: datasetCase.caseCount,
-                    caseId: res.case_id,
-                    imageVolumeId: res.image_volume_id,
-                    segVolumes,
-                    warnings: res.warnings ?? [],
-                })
-                if (segVolumes.some((s) => s.allBackground)) {
-                    toast.info('Label is all background', {
-                        description: `Case "${res.case_id}" has no segmentation foreground.`,
-                    })
-                }
-            } catch (e) {
-                toast.error('Failed to open case', {
-                    description: e instanceof Error ? e.message : 'Unknown error',
-                })
-            } finally {
-                setLoading(false)
-            }
-        },
-        [datasetCase, loading, setDatasetCase]
-    )
-
-    useEffect(() => {
-        const onKey = (e: KeyboardEvent) => {
-            if (!datasetCase) return
-            if (e.key === 'ArrowLeft') {
-                e.preventDefault()
-                go(-1)
-            } else if (e.key === 'ArrowRight') {
-                e.preventDefault()
-                go(1)
-            }
-        }
-        window.addEventListener('keydown', onKey)
-        return () => window.removeEventListener('keydown', onKey)
-    }, [datasetCase, go])
-
-    if (!datasetCase) return null
-
-    const canPrev = datasetCase.caseIndex > 0
-    const canNext = datasetCase.caseIndex < datasetCase.caseCount - 1
-
-    return (
-        <div className="flex items-center justify-center gap-4 py-2">
-            <Button
-                variant="outline"
-                size="icon"
-                onClick={() => go(-1)}
-                disabled={!canPrev || loading}
-                aria-label="Previous case"
-            >
-                <span className="text-lg font-bold">←</span>
-            </Button>
-            <span className="text-sm font-medium min-w-[8rem] text-center">
-                Case {datasetCase.caseIndex + 1} / {datasetCase.caseCount}
-            </span>
-            <Button
-                variant="outline"
-                size="icon"
-                onClick={() => go(1)}
-                disabled={!canNext || loading}
-                aria-label="Next case"
-            >
-                <span className="text-lg font-bold">→</span>
-            </Button>
         </div>
     )
 }

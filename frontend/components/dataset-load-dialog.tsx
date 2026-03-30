@@ -32,6 +32,7 @@ import { Label } from './ui/label'
 import { Input } from './ui/input'
 import { Badge } from './ui/badge'
 import { Card, CardContent, CardHeader } from './ui/card'
+import { HexColorPopover } from './hex-color-popover'
 import { Progress } from './ui/progress'
 import { Switch } from './ui/switch'
 import { FolderOpen, ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
@@ -556,15 +557,13 @@ export function DatasetLoadDialog({
                                             <div className="flex flex-col gap-2">
                                                 <Label className="text-xs">Color & role</Label>
                                                 <div className="flex items-center gap-3">
-                                                    <input
-                                                        type="color"
+                                                    <HexColorPopover
                                                         value={seg.color}
-                                                        onChange={(e) => {
+                                                        onChange={(hex) => {
                                                             const next = [...segs]
-                                                            next[idx] = { ...next[idx], color: e.target.value }
+                                                            next[idx] = { ...next[idx], color: hex }
                                                             setSegs(next)
                                                         }}
-                                                        className="h-8 w-10 cursor-pointer rounded border border-input"
                                                         disabled={isLoading}
                                                     />
                                                     <div className="flex items-center gap-1">

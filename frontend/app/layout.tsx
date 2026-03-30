@@ -27,7 +27,7 @@ export default function RootLayout({
                     }}
                 />
             </head>
-            <body className={inter.className}>
+            <body className={`${inter.className} min-h-0 antialiased`}>
                 <ThemeProvider defaultTheme="system" storageKey="ui-theme">
                     <QueryProvider>
                         <ElectronTitleBarWrapper>

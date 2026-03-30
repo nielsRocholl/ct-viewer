@@ -3,7 +3,7 @@
 import { useViewerStore } from '@/lib/store'
 import { shallow } from 'zustand/shallow'
 import { ViewerPanel } from './viewer-panel'
-import { DatasetViewerPanel, DatasetNav } from './dataset-viewer-panel'
+import { DatasetViewerPanel } from './dataset-viewer-panel'
 import { DatasetLesionStatsSection } from './dataset-lesion-size-chart'
 import { Button } from './ui/button'
 import { X } from 'lucide-react'
@@ -81,11 +81,8 @@ export function ViewerGrid() {
             )
         }
         return (
-            <div className="space-y-6">
-                <DatasetNav />
-                <div className="w-full max-w-[1800px] px-2">
-                    <DatasetViewerPanel />
-                </div>
+            <div className="flex min-h-0 flex-1 flex-col px-2">
+                <DatasetViewerPanel />
             </div>
         )
     }
@@ -113,9 +110,9 @@ export function ViewerGrid() {
     }
 
     return (
-        <div className="space-y-6">
+        <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-hidden">
             {/* Grid Info */}
-            <div className="flex items-center justify-between">
+            <div className="flex shrink-0 items-center justify-between">
                 <p className="text-sm text-muted-foreground">
                     {pairArray.length} / {MAX_PAIRS} pairs loaded
                 </p>
@@ -127,7 +124,7 @@ export function ViewerGrid() {
             </div>
 
             {/* Responsive Grid Layout */}
-            <div className={`grid grid-cols-1 ${gridColsClass} gap-6 auto-rows-fr`}>
+            <div className={`grid min-h-0 flex-1 grid-cols-1 ${gridColsClass} gap-6 auto-rows-fr`}>
                 {pairArray.map((pair) => (
                     <div key={pair.pairId} className="relative">
                         {/* Remove Button */}

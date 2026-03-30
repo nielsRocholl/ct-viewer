@@ -9,6 +9,58 @@ export const COLORBLIND_SAFE_PALETTE = [
 export const DEFAULT_LABEL_COLOR = COLORBLIND_SAFE_PALETTE[0]
 export const DEFAULT_PRED_COLOR = COLORBLIND_SAFE_PALETTE[1]
 
+export function hexToRgb(hex: string): { r: number; g: number; b: number } {
+    let h = hex.replace(/^#/, '')
+    if (h.length === 3) h = h.split('').map((c) => c + c).join('')
+    const n = parseInt(h, 16)
+    if (Number.isNaN(n) || h.length !== 6) return { r: 0, g: 0, b: 0 }
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 }
+}
+
+function rgbToHsv(r: number, g: number, b: number): { h: number; s: number; v: number } {
+    r /= 255
+    g /= 255
+    b /= 255
+    const max = Math.max(r, g, b)
+    const min = Math.min(r, g, b)
+    const d = max - min
+    let h = 0
+    if (d !== 0) {
+        if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60
+        else if (max === g) h = ((b - r) / d + 2) * 60
+        else h = ((r - g) / d + 4) * 60
+    }
+    const s = max === 0 ? 0 : (d / max) * 100
+    const v = max * 100
+    return { h, s, v }
+}
+
+export function hsvToHex(h: number, s: number, v: number): string {
+    s /= 100
+    v /= 100
+    const c = v * s
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+    const m = v - c
+    let rp = 0
+    let gp = 0
+    let bp = 0
+    if (h < 60) [rp, gp, bp] = [c, x, 0]
+    else if (h < 120) [rp, gp, bp] = [x, c, 0]
+    else if (h < 180) [rp, gp, bp] = [0, c, x]
+    else if (h < 240) [rp, gp, bp] = [0, x, c]
+    else if (h < 300) [rp, gp, bp] = [x, 0, c]
+    else [rp, gp, bp] = [c, 0, x]
+    const r = Math.round((rp + m) * 255)
+    const g = Math.round((gp + m) * 255)
+    const b = Math.round((bp + m) * 255)
+    return `#${[r, g, b].map((n) => n.toString(16).padStart(2, '0')).join('')}`
+}
+
+export function hexToHsv(hex: string): { h: number; s: number; v: number } {
+    const { r, g, b } = hexToRgb(hex)
+    return rgbToHsv(r, g, b)
+}
+
 /** Single-mask overlay color: cycles `COLORBLIND_SAFE_PALETTE` by mask slot index (0..n). */
 export function generateDistinctColor(
     maskSlotIndex: number,
@@ -122,17 +174,7 @@ export function buildLookupArray(colorMap: Map<number, string>, opacity: number)
             out[idx + 3] = 0
         } else {
             const hex = colorMap.get(label) ?? DEFAULT_LABEL_COLOR
-            const n = hex.replace(/^#/, '')
-            let r: number, g: number, b: number
-            if (n.length === 3) {
-                r = parseInt(n[0] + n[0], 16)
-                g = parseInt(n[1] + n[1], 16)
-                b = parseInt(n[2] + n[2], 16)
-            } else {
-                r = parseInt(n.slice(0, 2), 16)
-                g = parseInt(n.slice(2, 4), 16)
-                b = parseInt(n.slice(4, 6), 16)
-            }
+            const { r, g, b } = hexToRgb(hex)
             out[idx] = r
             out[idx + 1] = g
             out[idx + 2] = b

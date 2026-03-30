@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useCallback, useImperativeHandle, forwardRef, useMemo, memo } from 'react'
-import { DEFAULT_LABEL_COLOR, DEFAULT_PRED_COLOR } from '@/lib/color-utils'
+import { DEFAULT_LABEL_COLOR, DEFAULT_PRED_COLOR, hexToRgb } from '@/lib/color-utils'
 
 const LOCAL_PATCH_RADIUS = 15
 const MIN_WINDOW_WIDTH = 20
@@ -11,17 +11,6 @@ export interface CanvasRendererHandle {
     getWindowAtPoint: (canvasX: number, canvasY: number) => { level: number; width: number } | null
     getImagePoint: (canvasX: number, canvasY: number) => { x: number; y: number } | null
     canvas: HTMLCanvasElement | null
-}
-
-function hexToRgb(hex: string): [number, number, number] {
-    const n = hex.replace(/^#/, '')
-    if (n.length === 3) {
-        const r = parseInt(n[0] + n[0], 16)
-        const g = parseInt(n[1] + n[1], 16)
-        const b = parseInt(n[2] + n[2], 16)
-        return [r, g, b]
-    }
-    return [parseInt(n.slice(0, 2), 16), parseInt(n.slice(2, 4), 16), parseInt(n.slice(4, 6), 16)]
 }
 
 export interface OverlayLayerSpec {
@@ -147,7 +136,7 @@ function buildLookup(colorMap: Map<number, string>, opacity: number): [number, n
         if (label === 0) out.push([0, 0, 0, 0])
         else {
             const hex = colorMap.get(label) ?? DEFAULT_LABEL_COLOR
-            const [r, g, b] = hexToRgb(hex)
+            const { r, g, b } = hexToRgb(hex)
             out.push([r, g, b, alphaByte])
         }
     }
@@ -166,7 +155,7 @@ function buildLookupArray(colorMap: Map<number, string>, opacity: number): Uint8
             out[idx + 3] = 0
         } else {
             const hex = colorMap.get(label) ?? DEFAULT_LABEL_COLOR
-            const [r, g, b] = hexToRgb(hex)
+            const { r, g, b } = hexToRgb(hex)
             out[idx] = r
             out[idx + 1] = g
             out[idx + 2] = b

@@ -389,16 +389,27 @@ class SliceExtractorService:
         return windowed.astype(np.uint8)
     
     @staticmethod
+    def _binary_dilate_8(mask: np.ndarray) -> np.ndarray:
+        p = np.pad(mask, 1, constant_values=False)
+        h, w = mask.shape
+        out = np.zeros((h, w), dtype=bool)
+        for dy in range(3):
+            for dx in range(3):
+                out |= p[dy : dy + h, dx : dx + w]
+        return out
+
+    @staticmethod
     def _extract_boundaries(label_array: np.ndarray) -> np.ndarray:
         """Extract boundaries from a segmentation label array
         
         Identifies voxels at the interface between different labels.
+        The contour is ~2x visually thicker than a single-pixel ring (one 8-neighbor dilate).
         
         Args:
             label_array: 2D array of segmentation labels
             
         Returns:
-            Binary array where 1 indicates boundary voxels
+            Array with label values only on boundary voxels (thickened band)
         """
         padded = np.pad(label_array, pad_width=1, mode='constant', constant_values=0)
         center = padded[1:-1, 1:-1]
@@ -410,7 +421,9 @@ class SliceExtractorService:
         bottom = padded[2:, 1:-1]
         diff = (left != center) | (right != center) | (top != center) | (bottom != center)
         boundary = (center != 0) & diff
-        out = np.where(boundary, center, 0)
+        thin = np.where(boundary, center, 0)
+        thick_m = SliceExtractorService._binary_dilate_8(thin > 0)
+        out = np.where(thick_m & (center != 0), center, 0)
         return out.astype(label_array.dtype, copy=False)
     
     @staticmethod
