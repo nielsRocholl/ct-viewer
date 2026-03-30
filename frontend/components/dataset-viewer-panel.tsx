@@ -790,7 +790,11 @@ export function DatasetViewerPanel() {
                                 <div className="flex shrink-0 flex-wrap items-center gap-2">
                                     <Popover open={volumeInfoOpen} onOpenChange={setVolumeInfoOpen}>
                                         <PopoverTrigger asChild>
-                                            <Button variant="outline" size="sm" className="min-w-0 shrink text-xs">
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                className="min-w-[10rem] flex-1 basis-[10rem] text-xs"
+                                            >
                                                 Volume info
                                             </Button>
                                         </PopoverTrigger>
@@ -816,7 +820,11 @@ export function DatasetViewerPanel() {
                                     </Popover>
                                     <Popover>
                                         <PopoverTrigger asChild>
-                                            <Button variant="outline" size="sm" className="text-xs">
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                className="min-w-[10rem] flex-1 basis-[10rem] text-xs"
+                                            >
                                                 Segmentation Info
                                             </Button>
                                         </PopoverTrigger>
@@ -849,9 +857,9 @@ export function DatasetViewerPanel() {
                                     </Popover>
                                     <Popover>
                                         <PopoverTrigger asChild>
-                                            <button type="button" aria-label="Health status">
+                                            <button type="button" aria-label="Health status" className="shrink-0">
                                                 <Badge
-                                                    className={`h-8 min-w-7 rounded-sm p-0 flex items-center justify-center text-xs font-semibold ${healthBadgeClass}`}
+                                                    className={`flex h-8 min-w-9 shrink-0 items-center justify-center rounded-sm px-2 text-xs font-semibold ${healthBadgeClass}`}
                                                 >
                                                     {health.status === 'red' ? 'F' : health.status === 'orange' ? 'W' : 'P'}
                                                 </Badge>
