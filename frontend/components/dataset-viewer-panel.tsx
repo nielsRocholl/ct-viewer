@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
+import { useCallback, useState, useEffect, useLayoutEffect, useRef, useMemo, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useViewerStore } from '@/lib/store'
 import { mergeSegDisplay, type DatasetSeg } from '@/lib/dataset-seg-merge'
@@ -15,6 +15,8 @@ import { Switch } from './ui/switch'
 import { Label } from './ui/label'
 import { Input } from './ui/input'
 import { ToggleGroup, ToggleGroupItem } from './ui/toggle-group'
+import { Separator } from './ui/separator'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
 import {
     ZoomIn,
     ZoomOut,
@@ -24,6 +26,7 @@ import {
     ChevronRight,
     ChevronDown,
     ChevronUp,
+    Info,
 } from 'lucide-react'
 import { AXIS_MAP } from '@/lib/synchronization'
 import {
@@ -50,6 +53,44 @@ import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import { computePairHealth } from '@/lib/health'
 import { WINDOW_PRESETS } from '@/lib/window-presets'
 import { useViewerCanvasWheel } from '@/lib/use-viewer-canvas-wheel'
+
+function ControlPanelSection({
+    title,
+    description,
+    children,
+}: {
+    title: string
+    description?: string
+    children: ReactNode
+}) {
+    return (
+        <section className="flex flex-col gap-2">
+            <header className="flex items-center gap-1">
+                <h3 className="text-[11px] font-semibold uppercase leading-none tracking-[0.12em] text-muted-foreground">
+                    {title}
+                </h3>
+                {description ? (
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <button
+                                type="button"
+                                className="inline-flex shrink-0 rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                aria-label={description}
+                            >
+                                <Info className="size-3" aria-hidden />
+                                <span className="sr-only">{description}</span>
+                            </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-[16rem] text-xs">
+                            {description}
+                        </TooltipContent>
+                    </Tooltip>
+                ) : null}
+            </header>
+            <div className="flex flex-col gap-2">{children}</div>
+        </section>
+    )
+}
 
 const CLICK_THRESHOLD_PX = 6
 const WINDOW_ROI_RADIUS_MM = 20
@@ -114,6 +155,10 @@ export function DatasetViewerPanel() {
     const prefetchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const prefetchRequestIdRef = useRef(0)
     const segList = useMemo(() => datasetCase?.segVolumes ?? [], [datasetCase?.segVolumes])
+    const multiCompSegs = useMemo(
+        () => segList.filter((s) => (s.componentCount ?? 0) > 1),
+        [segList]
+    )
     const manySegs = segList.length >= SEG_LIST_COLLAPSE_AT
     const [maskPanelOpen, setMaskPanelOpen] = useState(!manySegs)
     useEffect(() => {
@@ -341,8 +386,10 @@ export function DatasetViewerPanel() {
         const ro = new ResizeObserver(schedule)
         const row = viewerRowRef.current
         const budget = canvasBudgetRef.current
+        const ctrl = controlsCardRef.current
         if (row) ro.observe(row)
         if (budget) ro.observe(budget)
+        if (ctrl) ro.observe(ctrl)
         schedule()
         return () => {
             if (rafId) cancelAnimationFrame(rafId)
@@ -471,23 +518,36 @@ export function DatasetViewerPanel() {
         (z) => setZoom(z)
     )
 
-    const handleSnapToComponent = useCallback(
-        async (volumeId: string, delta: number) => {
+    const snapToComponentIndex = useCallback(
+        async (volumeId: string, nextIndex: number) => {
             const seg = segList.find((s) => s.volumeId === volumeId)
             const total = seg?.componentCount ?? 0
             if (total < 2) return
+            const clamped = Math.max(1, Math.min(total, Math.round(nextIndex)))
             const current = componentIndexByVolumeId[volumeId] ?? 1
-            const next = Math.max(1, Math.min(total, current + delta))
-            if (next === current) return
-            setComponentIndexByVolumeId((prev) => ({ ...prev, [volumeId]: next }))
+            if (clamped === current) return
+            setComponentIndexByVolumeId((prev) => ({ ...prev, [volumeId]: clamped }))
             try {
-                const data = await fetchSliceForComponent(volumeId, orientation, next)
+                const data = await fetchSliceForComponent(volumeId, orientation, clamped)
                 setSliceIndex(data.slice_index)
             } catch {
                 toast.error('Could not snap to component')
             }
         },
         [segList, componentIndexByVolumeId, orientation]
+    )
+
+    const handleSnapToComponent = useCallback(
+        (volumeId: string, delta: number) => {
+            const seg = segList.find((s) => s.volumeId === volumeId)
+            const total = seg?.componentCount ?? 0
+            if (total < 2) return
+            const current = componentIndexByVolumeId[volumeId] ?? 1
+            const next = Math.max(1, Math.min(total, current + delta))
+            if (next === current) return
+            void snapToComponentIndex(volumeId, next)
+        },
+        [segList, componentIndexByVolumeId, snapToComponentIndex]
     )
 
     const flushWindowToStore = useCallback(() => {
@@ -760,7 +820,10 @@ export function DatasetViewerPanel() {
     )
     return (
         <div className="flex min-h-0 flex-1 flex-col">
-            <div ref={viewerRowRef} className="flex min-h-0 min-w-0 flex-1 gap-4">
+            <div
+                ref={viewerRowRef}
+                className="flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto"
+            >
                 <div className="min-h-0 min-w-0 flex-1 shrink" aria-hidden />
                 <Card className="flex h-full w-fit max-w-full shrink-0 flex-col overflow-hidden">
                     <CardHeader className="shrink-0">
@@ -977,40 +1040,40 @@ export function DatasetViewerPanel() {
                 </Card>
                 <Card
                     ref={controlsCardRef}
-                    className="flex w-full max-w-[28rem] shrink-0 flex-col overflow-hidden"
+                    className="flex min-h-0 min-w-0 max-w-[28rem] shrink flex-[0_1_28rem] flex-col overflow-hidden"
                 >
-                    <CardHeader className="flex shrink-0 flex-col gap-3 space-y-0">
-                        <CardTitle className="text-base font-semibold tracking-tight">Controls</CardTitle>
+                    <CardHeader className="flex shrink-0 flex-col gap-2 space-y-0 p-0 px-4 pt-4 pb-2">
+                        <CardTitle className="text-sm font-semibold leading-none tracking-tight">Controls</CardTitle>
                         <DatasetCaseNav className="w-full justify-center" />
                     </CardHeader>
-                    <CardContent className="min-w-0 space-y-5 flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+                    <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden px-4 pb-3 pt-0">
+                        <TooltipProvider delayDuration={300}>
                         {datasetCase.warnings && datasetCase.warnings.length > 0 && (
-                            <div className="shrink-0 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
-                                <div className="mb-1 font-medium">Warnings</div>
-                                <ul className="list-disc space-y-1 pl-4">
-                                    {datasetCase.warnings.map((w, i) => (
-                                        <li key={`${w}-${i}`}>{w}</li>
-                                    ))}
-                                </ul>
-                            </div>
+                            <ControlPanelSection title="Alerts" description="Review before reading this case.">
+                                <div className="shrink-0 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+                                    <ul className="list-disc space-y-1 pl-4">
+                                        {datasetCase.warnings.map((w, i) => (
+                                            <li key={`${w}-${i}`}>{w}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            </ControlPanelSection>
                         )}
-                        <div className="flex min-h-9 items-center justify-center">
-                            <div className="inline-flex min-w-0 rounded-xl border border-input bg-muted/30 p-0.5" role="group" aria-label="View orientation">
+                        <ControlPanelSection title="View" description="Plane and slice through the volume.">
+                            <div className="flex w-full min-w-0 rounded-lg border border-input bg-muted/30 p-px" role="group" aria-label="View orientation">
                                 {(['axial', 'sagittal', 'coronal'] as const).map((ori) => (
                                     <Button
                                         key={ori}
                                         variant={orientation === ori ? 'default' : 'ghost'}
                                         size="sm"
-                                        className="h-7 flex-1 rounded-lg px-2 text-xs"
+                                        className="h-6 min-w-0 flex-1 rounded-md px-1.5 text-[11px]"
                                         onClick={() => setOrientation(ori)}
                                     >
-                                        {ori === 'axial' ? 'Axial (Z)' : ori === 'sagittal' ? 'Sagittal (X)' : 'Coronal (Y)'}
+                                        {ori === 'axial' ? 'Axial' : ori === 'sagittal' ? 'Sagittal' : 'Coronal'}
                                     </Button>
                                 ))}
                             </div>
-                        </div>
-                        <div className="space-y-2">
-                            <div className="flex min-h-9 items-center gap-2">
+                            <div className="flex items-center gap-2">
                                 <Label className="text-xs shrink-0">
                                     Slice: {sliceIndex} / {maxSliceIndex}
                                 </Label>
@@ -1023,109 +1086,226 @@ export function DatasetViewerPanel() {
                                     className="flex-1"
                                 />
                             </div>
-                        </div>
-                        {segList.some((s) => (s.componentCount ?? 0) > 1) && (
-                            <div className="space-y-2">
-                                <Label className="text-xs">Component navigation</Label>
-                                <div className="space-y-1.5">
-                                    {segList
-                                        .filter((s) => (s.componentCount ?? 0) > 1)
-                                        .map((s, i) => {
+                        </ControlPanelSection>
+                        {multiCompSegs.length > 0 && (
+                            <>
+                                <Separator />
+                                <ControlPanelSection
+                                    title="Connected components"
+                                    description="Pick a connected component to jump the slice to that region (per mask)."
+                                >
+                                    <div
+                                        className={cn(
+                                            multiCompSegs.length === 2
+                                                ? 'grid grid-cols-2 gap-2'
+                                                : 'flex flex-col gap-1.5'
+                                        )}
+                                    >
+                                        {multiCompSegs.map((s, i) => {
                                             const total = s.componentCount ?? 0
                                             const current = componentIndexByVolumeId[s.volumeId] ?? 1
-                                            const name = s.name ?? (s.role === 'pred' ? 'Prediction' : s.role === 'gt' ? 'Label' : `Segmentation ${i + 1}`)
+                                            const name =
+                                                s.name ??
+                                                (s.role === 'pred'
+                                                    ? 'Prediction'
+                                                    : s.role === 'gt'
+                                                      ? 'Label'
+                                                      : `Segmentation ${i + 1}`)
+                                            const sliderId = `component-slider-${s.volumeId}`
+                                            const labelId = `component-label-${s.volumeId}`
                                             return (
-                                                <div key={s.volumeId} className="flex items-center gap-2 text-xs">
-                                                    <span className="min-w-0 truncate flex-1">{name}</span>
-                                                    <div className="flex items-center gap-0.5 shrink-0">
-                                                        <Button
-                                                            variant="outline"
-                                                            size="icon"
-                                                            className="h-6 w-6"
-                                                            onClick={() => handleSnapToComponent(s.volumeId, -1)}
-                                                            disabled={current <= 1}
+                                                <div
+                                                    key={s.volumeId}
+                                                    className="space-y-1 rounded-lg border border-border/80 bg-muted/20 p-2 dark:bg-muted/10"
+                                                >
+                                                    <div className="flex items-center justify-between gap-1.5">
+                                                        <span
+                                                            id={labelId}
+                                                            className="min-w-0 truncate text-xs font-medium text-foreground"
+                                                            title={name}
                                                         >
-                                                            <ChevronLeft className="h-3 w-3" />
-                                                        </Button>
-                                                        <span className="min-w-[3ch] text-center tabular-nums">
-                                                            {current}/{total}
+                                                            {name}
                                                         </span>
-                                                        <Button
-                                                            variant="outline"
-                                                            size="icon"
-                                                            className="h-6 w-6"
-                                                            onClick={() => handleSnapToComponent(s.volumeId, 1)}
-                                                            disabled={current >= total}
+                                                        <Badge
+                                                            variant="secondary"
+                                                            className="shrink-0 font-mono text-[10px] tabular-nums font-normal"
                                                         >
-                                                            <ChevronRight className="h-3 w-3" />
-                                                        </Button>
+                                                            {current} / {total}
+                                                        </Badge>
+                                                    </div>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <Tooltip>
+                                                            <TooltipTrigger asChild>
+                                                                <Button
+                                                                    type="button"
+                                                                    variant="outline"
+                                                                    size="icon"
+                                                                    className="h-7 w-7 shrink-0"
+                                                                    onClick={() =>
+                                                                        handleSnapToComponent(s.volumeId, -1)
+                                                                    }
+                                                                    disabled={current <= 1}
+                                                                    aria-label={`Previous component for ${name}`}
+                                                                >
+                                                                    <ChevronLeft className="size-3.5" />
+                                                                </Button>
+                                                            </TooltipTrigger>
+                                                            <TooltipContent side="top" className="text-xs">
+                                                                    Previous component
+                                                                </TooltipContent>
+                                                        </Tooltip>
+                                                        <Slider
+                                                            id={sliderId}
+                                                            aria-labelledby={labelId}
+                                                            value={[current]}
+                                                            min={1}
+                                                            max={total}
+                                                            step={1}
+                                                            onValueChange={(v) => {
+                                                                const n = v[0]
+                                                                if (n !== undefined) {
+                                                                    void snapToComponentIndex(s.volumeId, n)
+                                                                }
+                                                            }}
+                                                            className="flex-1"
+                                                        />
+                                                        <Tooltip>
+                                                            <TooltipTrigger asChild>
+                                                                <Button
+                                                                    type="button"
+                                                                    variant="outline"
+                                                                    size="icon"
+                                                                    className="h-7 w-7 shrink-0"
+                                                                    onClick={() =>
+                                                                        handleSnapToComponent(s.volumeId, 1)
+                                                                    }
+                                                                    disabled={current >= total}
+                                                                    aria-label={`Next component for ${name}`}
+                                                                >
+                                                                    <ChevronRight className="size-3.5" />
+                                                                </Button>
+                                                            </TooltipTrigger>
+                                                            <TooltipContent side="top" className="text-xs">
+                                                                    Next component
+                                                                </TooltipContent>
+                                                        </Tooltip>
                                                     </div>
                                                 </div>
                                             )
                                         })}
+                                    </div>
+                                </ControlPanelSection>
+                            </>
+                        )}
+                        <Separator />
+                        <ControlPanelSection
+                            title="Window & contrast"
+                            description="Click the image to sample level and width from a region."
+                        >
+                            <div className="space-y-2">
+                                <Select
+                                    value={presetId ?? ''}
+                                    onValueChange={(val) => {
+                                        const preset = WINDOW_PRESETS.find((p) => p.id === val)
+                                        if (!preset) return
+                                        setPresetId(preset.id)
+                                        setLocalWindowLevel(preset.wl)
+                                        setLocalWindowWidth(preset.ww)
+                                        setWindowLevel(preset.wl)
+                                        setWindowWidth(preset.ww)
+                                    }}
+                                >
+                                    <SelectTrigger>
+                                        <SelectValue placeholder="Window preset" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        {WINDOW_PRESETS.map((p) => (
+                                            <SelectItem key={p.id} value={p.id}>
+                                                {p.label}
+                                            </SelectItem>
+                                        ))}
+                                    </SelectContent>
+                                </Select>
+                            </div>
+                            <div className="space-y-2">
+                                <Label className="text-xs">Window Level: {localWindowLevel}</Label>
+                                <Slider
+                                    value={[localWindowLevel]}
+                                    onValueChange={handleWindowLevelChange}
+                                    onValueCommit={handleWindowLevelCommit}
+                                    min={-1000}
+                                    max={1000}
+                                    step={1}
+                                    className="w-full"
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <Label className="text-xs">Window Width: {localWindowWidth}</Label>
+                                <Slider
+                                    value={[localWindowWidth]}
+                                    onValueChange={handleWindowWidthChange}
+                                    onValueCommit={handleWindowWidthCommit}
+                                    min={1}
+                                    max={2000}
+                                    step={1}
+                                    className="w-full"
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                    <Label id="dataset-zoom-label" htmlFor="dataset-zoom-slider" className="text-xs">
+                                        Zoom
+                                    </Label>
+                                    <span
+                                        className="font-mono text-xs tabular-nums text-muted-foreground"
+                                        aria-live="polite"
+                                    >
+                                        {zoom.toFixed(2)}×
+                                    </span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="icon"
+                                        className="h-8 w-8 shrink-0"
+                                        onClick={handleZoomOut}
+                                        aria-label="Zoom out"
+                                    >
+                                        <ZoomOut className="h-4 w-4" />
+                                    </Button>
+                                    <Slider
+                                        id="dataset-zoom-slider"
+                                        aria-labelledby="dataset-zoom-label"
+                                        value={[zoom]}
+                                        onValueChange={(v) => {
+                                            const z = v[0]
+                                            if (z !== undefined) setZoom(Math.min(10, Math.max(0.1, z)))
+                                        }}
+                                        min={0.1}
+                                        max={10}
+                                        step={0.01}
+                                        className="flex-1"
+                                    />
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="icon"
+                                        className="h-8 w-8 shrink-0"
+                                        onClick={handleZoomIn}
+                                        aria-label="Zoom in"
+                                    >
+                                        <ZoomIn className="h-4 w-4" />
+                                    </Button>
                                 </div>
                             </div>
-                        )}
-                        <p className="text-xs text-muted-foreground">Click on image to set level and width from that area.</p>
-                        <div className="space-y-2">
-                            <Select
-                                value={presetId ?? ''}
-                                onValueChange={(val) => {
-                                    const preset = WINDOW_PRESETS.find((p) => p.id === val)
-                                    if (!preset) return
-                                    setPresetId(preset.id)
-                                    setLocalWindowLevel(preset.wl)
-                                    setLocalWindowWidth(preset.ww)
-                                    setWindowLevel(preset.wl)
-                                    setWindowWidth(preset.ww)
-                                }}
-                            >
-                                <SelectTrigger>
-                                    <SelectValue placeholder="Window preset" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    {WINDOW_PRESETS.map((p) => (
-                                        <SelectItem key={p.id} value={p.id}>
-                                            {p.label}
-                                        </SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
-                        </div>
-                        <div className="space-y-2">
-                            <Label className="text-xs">Window Level: {localWindowLevel}</Label>
-                            <Slider
-                                value={[localWindowLevel]}
-                                onValueChange={handleWindowLevelChange}
-                                onValueCommit={handleWindowLevelCommit}
-                                min={-1000}
-                                max={1000}
-                                step={1}
-                                className="w-full"
-                            />
-                        </div>
-                        <div className="space-y-2">
-                            <Label className="text-xs">Window Width: {localWindowWidth}</Label>
-                            <Slider
-                                value={[localWindowWidth]}
-                                onValueChange={handleWindowWidthChange}
-                                onValueCommit={handleWindowWidthCommit}
-                                min={1}
-                                max={2000}
-                                step={1}
-                                className="w-full"
-                            />
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <Label className="text-xs">Zoom: {zoom.toFixed(2)}x</Label>
-                            <Button variant="outline" size="icon" onClick={handleZoomOut} className="h-8 w-8">
-                                <ZoomOut className="h-4 w-4" />
-                            </Button>
-                            <Button variant="outline" size="icon" onClick={handleZoomIn} className="h-8 w-8">
-                                <ZoomIn className="h-4 w-4" />
-                            </Button>
-                        </div>
-                        <div className="min-w-0 space-y-3 border-t pt-3">
+                        </ControlPanelSection>
+                        <Separator />
+                        <ControlPanelSection
+                            title="Masks & overlay"
+                            description="Visibility, colors, and blend for each segmentation."
+                        >
+                            <div className="min-w-0 space-y-3">
                             {gtVolumeId && predVolumeId && diceData && (
                                 <div className="flex items-center gap-2 text-xs">
                                     <span className="text-muted-foreground">DICE:</span>
@@ -1278,20 +1458,27 @@ export function DatasetViewerPanel() {
                                     />
                                 </div>
                             )}
-                        </div>
-                        <Button variant="outline" onClick={handleReset} className="w-full">
-                            <RotateCcw className="h-4 w-4 mr-2" />
-                            Reset View
-                        </Button>
-                        <Button
-                            variant="outline"
-                            onClick={handleDownloadSlice}
-                            className="w-full gap-1.5"
-                            aria-label="Download slice as JPEG"
-                        >
-                            <Download className="h-4 w-4" />
-                            Download
-                        </Button>
+                            </div>
+                        </ControlPanelSection>
+                        <Separator />
+                        <ControlPanelSection title="Actions">
+                            <div className="flex flex-col gap-2">
+                                <Button variant="outline" onClick={handleReset} className="w-full">
+                                    <RotateCcw className="h-4 w-4 mr-2" />
+                                    Reset View
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    onClick={handleDownloadSlice}
+                                    className="w-full gap-1.5"
+                                    aria-label="Download slice as JPEG"
+                                >
+                                    <Download className="h-4 w-4" />
+                                    Download
+                                </Button>
+                            </div>
+                        </ControlPanelSection>
+                        </TooltipProvider>
                     </CardContent>
                 </Card>
                 <div className="min-h-0 min-w-0 flex-1 shrink" aria-hidden />

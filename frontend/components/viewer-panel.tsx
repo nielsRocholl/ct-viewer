@@ -1255,25 +1255,55 @@ export function ViewerPanel({ pairId }: ViewerPanelProps) {
                             </div>
                         </div>
 
-                        {/* Zoom Controls */}
-                        <div className="flex items-center gap-2">
-                            <Label className="text-xs">Zoom: {pair.zoom.toFixed(2)}x</Label>
-                            <Button
-                                variant="outline"
-                                size="icon"
-                                onClick={handleZoomOut}
-                                className="h-8 w-8"
-                            >
-                                <ZoomOut className="h-4 w-4" />
-                            </Button>
-                            <Button
-                                variant="outline"
-                                size="icon"
-                                onClick={handleZoomIn}
-                                className="h-8 w-8"
-                            >
-                                <ZoomIn className="h-4 w-4" />
-                            </Button>
+                        <div className="space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                                <Label id={`pair-zoom-label-${pairId}`} htmlFor={`pair-zoom-slider-${pairId}`} className="text-xs">
+                                    Zoom
+                                </Label>
+                                <span
+                                    className="font-mono text-xs tabular-nums text-muted-foreground"
+                                    aria-live="polite"
+                                >
+                                    {pair.zoom.toFixed(2)}×
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-8 w-8 shrink-0"
+                                    onClick={handleZoomOut}
+                                    aria-label="Zoom out"
+                                >
+                                    <ZoomOut className="h-4 w-4" />
+                                </Button>
+                                <Slider
+                                    id={`pair-zoom-slider-${pairId}`}
+                                    aria-labelledby={`pair-zoom-label-${pairId}`}
+                                    value={[pair.zoom]}
+                                    onValueChange={(v) => {
+                                        const z = v[0]
+                                        if (z !== undefined) {
+                                            updatePairZoom(pairId, Math.min(10, Math.max(0.1, z)))
+                                        }
+                                    }}
+                                    min={0.1}
+                                    max={10}
+                                    step={0.01}
+                                    className="flex-1"
+                                />
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-8 w-8 shrink-0"
+                                    onClick={handleZoomIn}
+                                    aria-label="Zoom in"
+                                >
+                                    <ZoomIn className="h-4 w-4" />
+                                </Button>
+                            </div>
                         </div>
 
                         {/* Masks / Overlay */}

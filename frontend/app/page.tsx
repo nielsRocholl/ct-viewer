@@ -1,7 +1,7 @@
 'use client'
 
 import { AppSidebar } from '@/components/app-sidebar'
-import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
+import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { ViewerGrid } from '@/components/viewer-grid'
 import { useViewerStore } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -20,7 +20,10 @@ export default function Home() {
             style={{ '--sidebar-width': '19rem' } as React.CSSProperties}
         >
             <AppSidebar />
-            <SidebarInset className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <SidebarInset className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div className="pointer-events-none absolute left-2 top-2 z-20 hidden md:block">
+                    <SidebarTrigger className="pointer-events-auto bg-background/80 shadow-sm backdrop-blur-sm" />
+                </div>
                 <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
                     <div
                         className={cn(

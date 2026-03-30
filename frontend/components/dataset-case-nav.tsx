@@ -190,23 +190,24 @@ export function DatasetCaseNav({ className }: { className?: string }) {
         <>
             <nav
                 className={cn(
-                    'relative flex min-h-[3.25rem] w-full items-center py-1.5 pl-1.5 pr-1.5 rounded-xl border border-border bg-card/95 shadow-md shadow-black/[0.056] ring-1 ring-black/[0.035] backdrop-blur-sm dark:bg-card/90 dark:shadow-black/[0.175] dark:ring-white/[0.07]',
+                    'relative flex min-h-9 w-full items-center py-1 pl-1 pr-1 rounded-lg border border-border bg-card/95 shadow-md shadow-black/[0.056] ring-1 ring-black/[0.035] backdrop-blur-sm dark:bg-card/90 dark:shadow-black/[0.175] dark:ring-white/[0.07]',
                     className
                 )}
-                aria-label="Navigate dataset cases"
+                aria-label="Case navigator — navigate dataset cases"
                 aria-busy={loading}
             >
-                <div className="flex min-w-0 flex-1 items-center justify-start gap-1.5">
+                <span className="sr-only">Case navigator</span>
+                <div className="flex min-w-0 flex-1 items-center justify-start gap-1">
                     <Button
                         type="button"
                         variant="outline"
-                        size="lg"
-                        className="relative z-10 size-11 shrink-0 rounded-lg border-input bg-background px-0 shadow-sm"
+                        size="icon"
+                        className="relative z-10 size-9 shrink-0 rounded-md border-input bg-background shadow-sm"
                         onClick={() => void go(-1)}
                         disabled={!canPrev || loading}
                         aria-label="Previous case"
                     >
-                        <ChevronLeft className="size-6" />
+                        <ChevronLeft className="size-4" />
                     </Button>
                     <TooltipProvider delayDuration={300}>
                         <Tooltip>
@@ -214,13 +215,13 @@ export function DatasetCaseNav({ className }: { className?: string }) {
                                 <Button
                                     type="button"
                                     variant="ghost"
-                                    size="lg"
-                                    className="relative z-10 size-11 shrink-0 rounded-lg px-0 text-muted-foreground hover:bg-muted hover:text-foreground"
+                                    size="icon"
+                                    className="relative z-10 size-9 shrink-0 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
                                     onClick={() => setPickerOpen(true)}
                                     disabled={loading}
                                     aria-label="Go to case — search or pick from list"
                                 >
-                                    <Search className="size-5" />
+                                    <Search className="size-4" />
                                 </Button>
                             </TooltipTrigger>
                             <TooltipContent side="bottom" className="text-xs">
@@ -229,36 +230,28 @@ export function DatasetCaseNav({ className }: { className?: string }) {
                         </Tooltip>
                     </TooltipProvider>
                 </div>
-                <div className="pointer-events-none absolute left-1/2 top-1/2 z-0 flex min-w-[8.5rem] max-w-[min(100%,12rem)] -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center px-2 text-center">
+                <div className="pointer-events-none absolute left-1/2 top-1/2 z-0 flex min-w-[6.5rem] max-w-[min(100%,11rem)] -translate-x-1/2 -translate-y-1/2 items-center justify-center px-1 text-center">
                     {loading ? (
-                        <Loader2 className="size-7 animate-spin text-muted-foreground" aria-hidden />
+                        <Loader2 className="size-5 animate-spin text-muted-foreground" aria-hidden />
                     ) : (
-                        <>
-                            <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                                Case navigator
-                            </span>
-                            <span className="text-xl font-bold tabular-nums leading-tight text-foreground">
-                                {datasetCase.caseIndex + 1}
-                                <span className="text-base font-medium text-muted-foreground">
-                                    {' '}
-                                    / {datasetCase.caseCount}
-                                </span>
-                            </span>
-                        </>
+                        <span className="text-sm font-semibold tabular-nums leading-none text-foreground">
+                            {datasetCase.caseIndex + 1}
+                            <span className="font-medium text-muted-foreground"> / {datasetCase.caseCount}</span>
+                        </span>
                     )}
                 </div>
-                <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5">
-                    <span className="size-11 shrink-0" aria-hidden />
+                <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
+                    <span className="size-9 shrink-0" aria-hidden />
                     <Button
                         type="button"
                         variant="outline"
-                        size="lg"
-                        className="relative z-10 size-11 shrink-0 rounded-lg border-input bg-background px-0 shadow-sm"
+                        size="icon"
+                        className="relative z-10 size-9 shrink-0 rounded-md border-input bg-background shadow-sm"
                         onClick={() => void go(1)}
                         disabled={!canNext || loading}
                         aria-label="Next case"
                     >
-                        <ChevronRight className="size-6" />
+                        <ChevronRight className="size-4" />
                     </Button>
                 </div>
             </nav>
